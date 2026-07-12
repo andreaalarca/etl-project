@@ -1,0 +1,10 @@
+plan_type_id,plan_type,plan_category,required_input,output_format,complexity_level,base_price
+1,Wall Layout Plan,Wall,Floor plan and wall measurements,PDF/DWG,Medium,8000
+2,Wall Partition Plan,Wall,Interior layout and room dimensions,PDF/DWG,Medium,9500
+3,Wall Elevation Drawing,Wall,Wall elevation reference and opening details,PDF/DWG,High,11000
+4,Roof Framing Plan,Roof,Roof layout and structural reference,PDF/DWG,High,14000
+5,Roof Drainage Plan,Roof,Roof layout and drainage direction,PDF/DWG,Medium,10000
+6,Roof Extension Plan,Roof,Existing roof plan and extension details,PDF/DWG,High,15000
+7,Window Schedule Plan,Window,Floor plan and window list,PDF/DWG,Medium,7500
+8,Window Opening Layout,Window,Wall elevation and opening measurements,PDF/DWG,Medium,8500
+9,Window Elevation Detail,Window,Window size reference and elevation details,PDF/DWG,High,10500

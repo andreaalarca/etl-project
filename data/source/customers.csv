@@ -1,0 +1,7 @@
+customer_id,customer_name,contact_person,phone_number,email,city,subcontractor_category
+1,BrightWall Masonry Works,Carlo Cruz,9171234567,carlo@brightwall.com,Quezon City,Wall
+2,NorthLine Partition Builders,Mika Santos,9181234567,mika@northline.com,Makati,Wall
+3,TopShield Roofing Design,Ana Reyes,9191234567,ana@topshield.com,Caloocan,Roof
+4,RainGuard Roof Systems,Leo Garcia,9201234567,leo@rainguard.com,Pasig,Roof
+5,ClearView Window Works,Lourisse Andrea Alarca,9211234567,andrea@clearview.com,Taguig,Window
+6,FramePro Window Planning,Mark Santos,9221234567,mark@framepro.com,Manila,Window
