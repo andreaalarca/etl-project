@@ -10,9 +10,9 @@ class ConstructionPlanTypesTransformer:
 
     def __init__(self):
 
-        self.staging_dir = Path(
-            os.getenv("STAGING_DIR", "./data/staging")
-        )
+        # self.staging_dir = Path(
+        #     os.getenv("STAGING_DIR", "./data/staging")
+        # )
 
         # Source -> SQL mapping
         self.COLUMN_MAPPING = {

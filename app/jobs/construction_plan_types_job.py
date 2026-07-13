@@ -30,7 +30,6 @@ from app.load.construction_plan_types_loader import (
 
 def main(chunksize: int | None = None) -> None:
 
-    output_file = Path("data/staging/construction_plan_types.parquet")
 
     preprocess = ConstructionPlanTypesPreprocessor()
     transformer = ConstructionPlanTypesTransformer()
@@ -46,7 +45,6 @@ def main(chunksize: int | None = None) -> None:
 
             clean, writer = preprocess.process(
                 data,
-                output_file,
                 writer,
             )
 
@@ -60,7 +58,6 @@ def main(chunksize: int | None = None) -> None:
 
                 clean, writer = preprocess.process(
                     chunk,
-                    output_file,
                     writer,
                 )
 
@@ -75,7 +72,6 @@ def main(chunksize: int | None = None) -> None:
     if transformed_df is not None:
         inserted = loader.process(
             transformed_df,
-            output_file,
         )
 
         print(f"{inserted} rows inserted.")

@@ -55,6 +55,13 @@ class ConstructionPlanTypesLoader:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.archive_dir = base_archive_dir / timestamp
 
+        
+        today = datetime.now().strftime("%Y%m%d")
+
+        self.staging_dir = Path(
+            f"data/staging/construction_plan_types_{today}.parquet"
+        )
+
         self.archive_dir.mkdir(
             parents=True,
             exist_ok=True,
@@ -157,12 +164,11 @@ class ConstructionPlanTypesLoader:
     
     def process(
         self,
-        df: pd.DataFrame,
-        source_file: Path,
+        df: pd.DataFrame
     ) -> int:
 
         inserted = self.load(df)
 
-        self.archive(source_file)
+        self.archive(self.staging_dir)
 
         return inserted

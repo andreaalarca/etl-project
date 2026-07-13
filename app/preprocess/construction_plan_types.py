@@ -191,11 +191,20 @@ class ConstructionPlanTypesPreprocessor:
     def process(
         self,
         df: pd.DataFrame,
-        output_file: Path,
         writer: pq.ParquetWriter | None = None,
     ) -> tuple[pd.DataFrame, pq.ParquetWriter]:
 
         cleaned_df = self._clean_dataframe(df)
+
+        
+    # Create output filename
+        # today = datetime.now().strftime("%Y%m%d")
+
+        today = datetime.now().strftime("%Y%m%d")
+
+        output_file = ( self.staging_dir /
+            f"construction_plan_types_{today}.parquet"
+        )
 
         writer = self._write_to_parquet(
             cleaned_df,
@@ -206,28 +215,28 @@ class ConstructionPlanTypesPreprocessor:
         return cleaned_df, writer
 
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    preprocessor = ConstructionPlanTypesPreprocessor()
+#     preprocessor = ConstructionPlanTypesPreprocessor()
 
-    # Extract raw data
-    df = preprocessor.extractor.extract()
+#     # Extract raw data
+#     df = preprocessor.extractor.extract()
 
-    # Create output filename
-    today = datetime.now().strftime("%Y%m%d")
+#     # Create output filename
+#     today = datetime.now().strftime("%Y%m%d")
 
-    output_file = (
-        preprocessor.staging_dir
-        / f"construction_plan_types_{today}.parquet"
-    )
+#     output_file = (
+#         preprocessor.staging_dir
+#         / f"construction_plan_types_{today}.parquet"
+#     )
 
-    # Process and write parquet
-    cleaned_df = preprocessor.process(
-        df=df,
-        output_file=output_file,
-    )
+#     # Process and write parquet
+#     cleaned_df = preprocessor.process(
+#         df=df,
+#         output_file=output_file,
+#     )
 
-    print("\n=== Preview ===")
-    print(cleaned_df.head())
+#     print("\n=== Preview ===")
+#     print(cleaned_df.head())
 
-    print(f"\nRows processed: {len(cleaned_df)}")
+#     print(f"\nRows processed: {len(cleaned_df)}")
