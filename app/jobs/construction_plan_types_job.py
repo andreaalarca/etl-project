@@ -5,10 +5,8 @@ Orchestrates the extraction, transformation, and loading of construction plan ty
 Handles file acquisition, format detection, and archiving of source files.
 """
 
-import os
+import argparse
 import sys
-import shutil
-from datetime import datetime
 from pathlib import Path
 
 # Add the app directory to the path so we can import from app modules
@@ -16,11 +14,21 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import pandas as pd
 
-from app.pull.construction_plan_types_extractor import extract_construction_plan_types
-from app.preprocess.construction_plan_types import ConstructionPlanTypesPreprocessor
-from app.transform.construction_plan_types_transformer import ConstructionPlanTypesTransformer
-from app.load.construction_plan_types_loader import ConstructionPlanTypesLoader
-def main():
+from app.pull.construction_plan_types_extractor import (
+    extract_construction_plan_types,
+)
+from app.preprocess.construction_plan_types import (
+    ConstructionPlanTypesPreprocessor,
+)
+from app.transform.construction_plan_types_transformer import (
+    ConstructionPlanTypesTransformer,
+)
+from app.load.construction_plan_types_loader import (
+    ConstructionPlanTypesLoader,
+)
+
+
+def main(chunksize: int | None = None) -> None:
 
     output_file = Path("data/staging/construction_plan_types.parquet")
 
@@ -31,7 +39,7 @@ def main():
     writer = None
     transformed_df = None
 
-    data = extract_construction_plan_types(chunksize=5000)
+    data = extract_construction_plan_types(chunksize=chunksize)
 
     try:
         if isinstance(data, pd.DataFrame):
@@ -72,9 +80,23 @@ def main():
 
         print(f"{inserted} rows inserted.")
 
-# if __name__ == "__main__":
-#     success = main()
-#     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
-    main()
+
+    parser = argparse.ArgumentParser(
+        description="ETL Job for Construction Plan Types"
+    )
+
+    parser.add_argument(
+        "--chunksize",
+        type=int,
+        default=None,
+        help=(
+            "Number of rows to process per chunk. "
+            "If omitted, the entire file is processed at once."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    main(chunksize=args.chunksize)
