@@ -7,6 +7,8 @@ from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from datetime import datetime
 
+from app.config.warehouse_config import WarehouseConfig
+
 load_dotenv()
 
 
@@ -16,25 +18,9 @@ class ConstructionPlanTypesLoader:
 
     def __init__(self):
 
-        warehouse_url = os.getenv("WAREHOUSE_URL")
-
-        if warehouse_url:
-            self.warehouse_url = warehouse_url
-            self.schema = os.getenv("SCHEMA", "data_test")
-        else:
-            self.warehouse_url = (
-                f"postgresql://"
-                f"{os.getenv('POSTGRES_DB_SCHEMA_DATA_LAKE_USER')}:"
-                f"{os.getenv('POSTGRES_DB_SCHEMA_DATA_LAKE_PASSWORD')}@"
-                f"{os.getenv('POSTGRES_DB_SCHEMA_DATA_LAKE_HOST')}:"
-                f"{os.getenv('POSTGRES_DB_SCHEMA_DATA_LAKE_PORT')}/"
-                f"{os.getenv('POSTGRES_DB_SCHEMA_DATA_LAKE_NAME')}"
-            )
-
-            self.schema = os.getenv(
-                "POSTGRES_DB_SCHEMA_DATA_LAKE_SCHEMA",
-                "data_test",
-            )
+        config = WarehouseConfig()
+        self.warehouse_url = config.warehouse_url
+        self.schema = config.schema
 
         self.batch_size = int(
             os.getenv("BATCH_SIZE", "1000")
@@ -55,7 +41,7 @@ class ConstructionPlanTypesLoader:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.archive_dir = base_archive_dir / timestamp
 
-        
+
         today = datetime.now().strftime("%Y%m%d")
 
         self.staging_dir = Path(
@@ -109,7 +95,7 @@ class ConstructionPlanTypesLoader:
                 inserted += len(chunk)
 
         return inserted
-    
+
     def archive(
         self,
         source_file: Path,
@@ -130,7 +116,7 @@ class ConstructionPlanTypesLoader:
         )
 
         return destination
-    
+
     # def process(
     #     self,
     #     parquet_file: Path,
@@ -161,7 +147,7 @@ class ConstructionPlanTypesLoader:
         df = pd.read_parquet(parquet_file)
 
         return self.load(df)
-    
+
     def process(
         self,
         df: pd.DataFrame
