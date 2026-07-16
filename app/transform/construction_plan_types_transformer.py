@@ -5,6 +5,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from app.utils.logger import logger
+
 
 class ConstructionPlanTypesTransformer:
 
@@ -55,6 +57,7 @@ class ConstructionPlanTypesTransformer:
         }
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        logger.info("Construction Plan Types Job", "Transform", "Starting data transformation")
 
         df = df.copy()
 
@@ -158,6 +161,7 @@ class ConstructionPlanTypesTransformer:
         # Example
         # df["created_at"] = pd.Timestamp.now()
 
+        logger.info("Construction Plan Types Job", "Transform", f"Transformation complete. Shape: {df.shape}")
         return df
     
 #     def write_parquet(

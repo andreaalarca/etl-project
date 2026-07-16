@@ -11,6 +11,7 @@ import pyarrow as pa
 from app.pull.construction_plan_types_extractor import (
     ConstructionPlanTypesExtractor,
 )
+from app.utils.logger import logger
 class ConstructionPlanTypesPreprocessor:
 
     # Configuration for missing value handling
@@ -92,7 +93,7 @@ class ConstructionPlanTypesPreprocessor:
             if column in df.columns:
                 missing_count = df[column].isna().sum()
                 if missing_count > 0:
-                    print(f"Warning: Column '{column}' has {missing_count} missing values - applying strategy: '{strategy}'")
+                    logger.warning("Construction Plan Types Job", "Preprocess", f"Column '{column}' has {missing_count} missing values - applying strategy: '{strategy}'")
 
                     if strategy == 'drop':
                         # Drop rows where this column is missing
@@ -125,6 +126,7 @@ class ConstructionPlanTypesPreprocessor:
                 error_df.to_csv(error_file, mode='a', header=False, index=False)
             else:
                 error_df.to_csv(error_file, index=False)
+            logger.info("Construction Plan Types Job", "Preprocess", f"Saved {len(error_records)} error records to {error_file}")
 
         return df
     
