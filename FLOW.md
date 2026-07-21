@@ -1,83 +1,127 @@
-# ETL Flow for Construction Plan Types
+# ETL Flow Explanation (Construction Plan Types Job)
 
-## Overview
-This document describes the ETL process for construction plan types data as implemented in `app/jobs/construction_plan_types_job.py`.
+This document explains the end‑to‑end flow of the **construction_plan_types_job.py** job, focusing on how chunking interacts with staging and archiving, and clarifies the archiving behavior.
 
-## Flow Breakdown
+---  
 
-### Pull (Extract)
-- **Module**: `app.pull.construction_plan_types_extractor:ConstructionPlanTypesExtractor`
-- **Responsibilities**:
-  - Receives the source file path from the environment variable `SOURCE_FILE_PATH`.
-  - Copies the source file to the raw data directory (to preserve the original).
-  - Reads the source file (supporting CSV, Excel, TXT, TSV) with optional chunking (via `CHUNK_SIZE` environment variable).
-  - Returns either a single DataFrame or an iterator of DataFrames (for chunked processing).
+## 1. High‑level Pipeline  
 
-### Preprocess
-- **Module**: `app.preprocess.construction_plan_types:ConstructionPlanTypesPreprocessor`
-- **Responsibilities**:
-  - Validates the file structure (checks for empty file and missing columns).
-  - Normalizes header names: strips whitespace, converts to lowercase, replaces spaces and hyphens with underscores.
-  - Validates that all required source columns are present.
-  - Cleans string values (strips whitespace and replaces "nan" with pd.NA).
-  - Handles missing values according to a predefined strategy (e.g., drop rows with missing IDs, fill strings with empty string, etc.).
-  - Returns a cleaned DataFrame (or combines cleaned chunks if processing in chunks).
+```
+Extractor  →  Preprocessor  →  Transformer  →  Loader
+   │            │            │            │
+   ▼            ▼            ▼            ▼
+Source file  Cleaned DF   Transformed DF  Loaded into Warehouse
+                                                            │
+                                                            ▼
+                                                     Archive (staging → archive)
+```
 
-### Transform
-- **Module**: `app.transform.construction_plan_types_transformer:ConstructionPlanTypesTransformer`
-- **Responsibilities**:
-  - Maps source column names to SQL column names using a predefined mapping.
-  - Validates that required SQL columns are present after mapping.
-  - Adds any missing destination columns with default values (or NULL).
-  - Reorders columns to match the SQL schema.
-  - Converts data types to the appropriate SQL types (e.g., Int64 for IDs, float64 for prices, string for text).
-  - Applies business rules (e.g., setting negative prices to zero, removing rows with null IDs).
-  - (Optionally) creates derived or calculated columns.
-  - Removes any unnecessary columns (keeping only those in the SQL schema).
-  - Returns a transformed DataFrame ready for loading.
+The **Job orchestrator** (`app/jobs/construction_plan_types_job.py`) orchestrates the four stages:
 
-### Load
-- **Module**: `app.load.construction_plan_types_loader:ConstructionPlanTypesLoader`
-- **Responsibilities**:
-  - Reads the transformed DataFrame (passed directly from the Transform step).
-  - Performs batch inserts into the database using the configured batch size.
-  - Handles transactions via SQLAlchemy's context manager (automatic commit on success, rollback on failure).
-  - Returns the number of inserted rows.
-  - (Note: The archiving of the source file is handled in the job after loading, not in the loader.)
+1. **Creates** the extractor, preprocessor, transformer, and loader objects.  
+2. **Pulls** data from the extractor – either a single `pandas.DataFrame` (no chunking) or a generator of `DataFrame`s (when `chunksize` > 0).  
+3. **Passes a writer object** to the preprocessor so cleaned data can be appended to a **single** Parquet staging file.  
+4. **Sends** each transformed chunk to the loader for bulk insertion.  
+5. **After all chunks** are processed, archives the single staging file (or moves it to an error directory on failure).
 
-### Job Orchestration (in `app/jobs/construction_plan_types_job.py`)
-- **Main Function**: `main()`
-- **Steps**:
-  1. Load environment variables.
-  2. Validate and set up configuration (source file path, directories, chunk size).
-  3. Ensure required directories exist (raw, staging, error, archive).
-  4. Validate the source file exists and is readable.
-  5. **Pull**: 
-       - Copy the source file to the raw directory.
-       - Extract data from the copied file (with optional chunking).
-  6. **Preprocess**: 
-       - Clean the extracted data (handle both single DataFrame and chunked iterator).
-  7. **Transform**: 
-       - Transform the preprocessed data to match SQL schema and apply business rules.
-  8. **Load**: 
-       - Load the transformed data into the database (using the loader's load method).
-  9. **Archive Parquet**: 
-       - Save the transformed data as a Parquet file in the staging directory for auditability.
-  10. **Archive Source**: 
-       - Move the copied source file from the raw directory to the archive directory (with timestamp to avoid overwriting).
-  11. Log success or failure and return appropriate exit code.
+---
 
-## Environment Variables
-- `SOURCE_FILE_PATH`: (Required) Full path to the source file.
-- `CHUNK_SIZE`: (Optional) Number of rows per chunk for chunked processing (applies to CSV, TXT, TSV).
-- `RAW_DIR`: (Default: `./data/raw`) Directory for raw data copies.
-- `STAGING_DIR`: (Default: `./data/staging`) Directory for staged Parquet files.
-- `ERROR_DIR`: (Default: `./data/error`) Directory for error records.
-- `ARCHIVE_DIR`: (Default: `./data/archive/construction_plan_types`) Directory for archived source files.
-- Plus the variables used by the loader for database connection (WAREHOUSE_URL, SCHEMA, etc.) and batch size (BATCH_SIZE).
+## 2. Extractor Output  
 
-## Notes
-- The original source file is never modified; only a copy is used for processing.
-- The job supports both single-file and chunked processing (for applicable file types).
-- Error handling is in place: any exception during the process will be caught, logged, and the job will return a failure status.
-- The Parquet file saved in the staging directory is for auditing and can be used for reprocessing if needed.
+| `chunksize` argument | Return type of `extract_construction_plan_types(chunksize=…)` |
+|----------------------|--------------------------------------------------------------|
+| **`None`** (default) | A single `pandas.DataFrame` containing the whole file. |
+| **Integer > 0**      | A **generator** yielding `pandas.DataFrame` objects, each ≤ `chunksize` rows. |
+
+*The extractor only reads the source file; it never writes to disk.*
+
+---
+
+## 3. Writer (Staging File Handling)
+
+* The **preprocessor** (`ConstructionPlanTypesPreprocessor`) receives a `writer` argument.  
+* **First call**: creates a **Parquet writer** pointed at `self.staging_dir` (e.g., `data/staging/construction_plan_types_20260721.parquet`).  
+* **Subsequent calls**: receives the same writer, appends the cleaned chunk, and returns the updated writer.  
+* After the final chunk, the job’s `finally` block calls `writer.close()` to finalize the file.
+
+**Result:** Whether the data arrived as one DataFrame or many chunks, **exactly one** Parquet file ends up at `self.staging_dir`.
+
+---
+
+## 4. Loader Responsibilities  
+
+* `ConstructionPlanTypesLoader.__init__` receives the target schema, table name, and `batch_size` from the job configuration.  
+* Its `load(df)` method receives a **transformed** `DataFrame` (either the whole dataset or a chunk) and inserts it into the warehouse using:  
+
+  1. **Primary path** – `psycopg2.extras.execute_values` (high‑performance bulk insert).  
+  2. **Fallback path** – SQLAlchemy `to_sql` with `method="multi"` if the psycopg2 path fails.  
+
+*The loader never touches the staging file; it works solely with the in‑memory DataFrame supplied to it.*
+
+---
+
+## 5. Archiving Step  
+
+After the `try/except` block finishes (whether successfully or via an exception that is re‑raised only after writer handling), the job executes:
+
+```python
+if writer is not None:
+    logger.info("Construction Plan Types Job", "Load",
+                f"Archiving staging files from {loader.staging_dir}")
+    loader.archive(loader.staging_dir)
+```
+
+* `loader.archive(source_file: Path)` moves the file from `source_file` (the staging path) to a **timestamped subdirectory** under the configured archive root:
+
+```
+<archive_root>/<timestamp>/construction_plan_types_20260721.parquet
+```
+
+* Because there is **only one** staging file (see §3), the archive step moves **that single file**.  
+* The archive filename **remains unchanged**; only its directory gets a timestamp, preserving traceability.
+
+### Archiving Behavior Summary
+
+| Scenario                               | Staging file produced                                   | Archive result                                                                 |
+|----------------------------------------|----------------------------------------------------------|--------------------------------------------------------------------------------|
+| **No chunking** (`chunksize=None`)     | One Parquet file containing the whole dataset.           | Moved once to `<archive>/<timestamp>/construction_plan_types_<date>.parquet`. |
+| **Chunked processing** (`chunksize=N`) | One Parquet file that grows incrementally as each cleaned chunk is appended. | Same single file moved once after the last chunk has been processed.          |
+| **Error during processing**            | Writer may have written some chunks; job moves the **partially written** file to the error directory (`_move_source_file_to_error`) **instead** of archiving it. | No archive; the source file is quarantined for inspection.                    |
+
+---
+
+## 6. Diagram of the Flow with Chunking  
+
+```
+Source file (CSV)
+        │
+Extractor (generator of chunks) ──► ──► ──► ──► ──► ──► ──► ──►
+        │                           │   │   │   │   │   │   │
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
+Preprocessor (receives writer)   Chunk‑1 Chunk‑2 … Chunk‑k
+        │                           │   │   │   │   │   │   │
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
+Transformer                       ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓
+        │                         (cleaned chunks)
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
+Loader                            ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
+        │                         Inserted into warehouse
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
+   (after loop) writer.close()   │   │   │   │   │   │   │   │
+        │                         │   │   │   │   │   │   │   │
+        ▼                         ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
+   Archive step ──────────────────► Move staging.parquet → archive/<ts>/staging.parquet
+```
+
+---
+
+## 7. Key Take‑aways  
+
+* **Chunking does NOT create multiple staging/archive files** – the design intentionally writes *all* cleaned data to a **single** Parquet file (`staging_path`).  
+* Consequently, the **archive step always moves exactly one file**, regardless of `chunksize`.  
+* If you ever need **per‑chunk archiving** (e.g., to keep intermediate snapshots), you would need to modify the job to call `loader.archive` inside the chunk loop or change the preprocessor to write a new file each iteration.  
+* The current implementation is optimal for most ETL workloads: a single archive file simplifies downstream auditing while still allowing **high‑performance bulk inserts** via chunked reading to keep memory usage low.  
+
+---
+
+*Thank you for reading!*

@@ -3,7 +3,7 @@ from pathlib import Path
 import shutil
 
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from dotenv import load_dotenv
 from datetime import datetime
 import psycopg2
@@ -35,6 +35,9 @@ class ConstructionPlanTypesLoader:
             future=True,
         )
 
+        # Ensure schema and table exist
+        self._ensure_schema_and_table()
+
         base_archive_dir = Path(
             os.getenv(
                 "ARCHIVE_DIR",
@@ -56,6 +59,35 @@ class ConstructionPlanTypesLoader:
             exist_ok=True,
         )
 
+    def _ensure_schema_and_table(self):
+        """Create the schema and table if they do not already exist."""
+        inspector = inspect(self.engine)
+        schema_name = self.schema
+        table_name = self.TABLE_NAME
+
+        # Create schema if missing
+        if not inspector.has_schema(schema_name):
+            with self.engine.begin() as conn:
+                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
+            # Update inspector to see the new schema
+            inspector = inspect(self.engine)
+
+        # Create table if missing
+        if not inspector.has_table(table_name, schema=schema_name):
+            # Define columns matching the transformer's expectation
+            columns = [
+                'plan_type_id BIGINT',
+                'plan_type TEXT',
+                'plan_category TEXT',
+                'required_input TEXT',
+                'output_format TEXT',
+                'complexity_level TEXT',
+                'base_price DOUBLE PRECISION',
+            ]
+            cols_sql = ',\n    '.join(columns)
+            create_sql = f'CREATE TABLE IF NOT EXISTS "{schema_name}"."{table_name}" (\n    {cols_sql}\n);'
+            with self.engine.begin() as conn:
+                conn.execute(text(create_sql))
 
     def load(
         self,
