@@ -39,6 +39,12 @@ class WarehouseConfig:
         print(f"  Database: {name}")  # DEBUG
         print(f"  User: {user}")  # DEBUG
 
+        # If running inside a container, override host and port to use the Docker service
+        if self._running_in_container():
+            host = "postgres"
+            port = "5432"
+            print(f"  Detected container environment - overriding host to '{host}' and port to '{port}'")  # DEBUG
+
         # Construct the warehouse URL
         self.warehouse_url = (
             f"postgresql://{user}:{password}@{host}:{port}/{name}"
@@ -74,6 +80,20 @@ class WarehouseConfig:
 
         print(f"DEBUG WarehouseConfig: schemas={self.schemas}")  # DEBUG
         print(f"DEBUG: WarehouseConfig initialized for dataset_type={dataset_type}")  # DEBUG
+
+    def _running_in_container(self) -> bool:
+        """
+        Detect if the current process is running inside a Docker container.
+        """
+        # Check for common indicators
+        if os.path.exists('/.dockerenv'):
+            return True
+        # Check for environment variable commonly set in containers
+        if os.getenv('container') == 'docker':
+            return True
+        # Optionally check for certain environment variables set by our compose
+        # Not foolproof but good enough for our use case
+        return False
 
     def get_schema(self, name: str) -> str:
         """
