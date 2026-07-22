@@ -76,7 +76,7 @@ class ConstructionPlanTypesLoader:
         if not inspector.has_table(table_name, schema=schema_name):
             # Define columns matching the transformer's expectation
             columns = [
-                'plan_type_id BIGINT',
+                'plan_type_id BIGINT PRIMARY KEY',
                 'plan_type TEXT',
                 'plan_category TEXT',
                 'required_input TEXT',
@@ -84,8 +84,14 @@ class ConstructionPlanTypesLoader:
                 'complexity_level TEXT',
                 'base_price DOUBLE PRECISION',
             ]
+
             cols_sql = ',\n    '.join(columns)
-            create_sql = f'CREATE TABLE IF NOT EXISTS "{schema_name}"."{table_name}" (\n    {cols_sql}\n);'
+            create_sql = f'''
+            CREATE TABLE IF NOT EXISTS "{schema_name}"."{table_name}" (
+                {cols_sql}
+            );
+            '''
+
             with self.engine.begin() as conn:
                 conn.execute(text(create_sql))
 
