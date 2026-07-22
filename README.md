@@ -85,7 +85,6 @@ Recommended Extensions
 
 ```bash
 git clone <repository-url>
-
 cd etl-project
 ```
 
@@ -128,8 +127,7 @@ pip install -r requirements.txt
 Create a `.env` file in the project root. This file contains both ETL application configuration and Airflow service configuration.
 
 Example:
-
-```env
+```
 # ============================================================================
 # ETL APPLICATION CONFIGURATION
 # ============================================================================
@@ -138,19 +136,46 @@ Example:
 DATASET_TYPE=DATA_LAKE
 
 # Database Configuration for ETL Operations
-POSTGRES_DATA_LAKE_HOST=localhost
-POSTGRES_DATA_LAKE_PORT=5432
-POSTGRES_DATA_LAKE_DB=analytics
-POSTGRES_DATA_LAKE_USER=postgres
-POSTGRES_DATA_LAKE_PASSWORD=your_password
+POSTGRES_DB_SCHEMA_DATA_LAKE_HOST=localhost
+POSTGRES_DB_SCHEMA_DATA_LAKE_PORT=5434
+POSTGRES_DB_SCHEMA_DATA_LAKE_NAME=analytics
+POSTGRES_DB_SCHEMA_DATA_LAKE_USER=airflow
+POSTGRES_DB_SCHEMA_DATA_LAKE_PASSWORD=airflow
+POSTGRES_DB_SCHEMA_DATA_LAKE_SCHEMA=data_lake
 
-SCHEMA=data_lake
+# Database Configuration for ETL Operations (DATA_SET)
+POSTGRES_DB_SCHEMA_DATA_SET_HOST=localhost
+POSTGRES_DB_SCHEMA_DATA_SET_PORT=5434
+POSTGRES_DB_SCHEMA_DATA_SET_NAME=analytics
+POSTGRES_DB_SCHEMA_DATA_SET_USER=airflow
+POSTGRES_DB_SCHEMA_DATA_SET_PASSWORD=airflow
+POSTGRES_DB_SCHEMA_DATA_SET_SCHEMA=data_set
+
+# Dry Run Database Configuration DATA LAKE
+TEST_POSTGRES_DB_SCHEMA_DATA_LAKE_HOST=localhost
+TEST_POSTGRES_DB_SCHEMA_DATA_LAKE_PORT=5434
+TEST_POSTGRES_DB_SCHEMA_DATA_LAKE_NAME=analytics_test
+TEST_POSTGRES_DB_SCHEMA_DATA_LAKE_USER=airflow
+TEST_POSTGRES_DB_SCHEMA_DATA_LAKE_PASSWORD=airflow
+TEST_POSTGRES_DB_SCHEMA_DATA_LAKE_SCHEMA=data_lake
+
+# Dry Run Database Configuration DATA SET
+TEST_POSTGRES_DB_SCHEMA_DATA_SET_HOST=localhost
+TEST_POSTGRES_DB_SCHEMA_DATA_SET_PORT=5434
+TEST_POSTGRES_DB_SCHEMA_DATA_SET_NAME=analytics_test
+TEST_POSTGRES_DB_SCHEMA_DATA_SET_USER=airflow
+TEST_POSTGRES_DB_SCHEMA_DATA_SET_PASSWORD=airflow
+TEST_POSTGRES_DB_SCHEMA_DATA_SET_SCHEMA=data_set
 
 # File Paths for ETL Processing
+INPUT_DIR=./data/input
+OUTPUT_DIR=./data/output
+LOG_DIR=./logs
 RAW_DIR=./data/raw
 STAGING_DIR=./data/staging
 ARCHIVE_DIR=./data/archive
 ERROR_DIR=./data/error
+SOURCE_DIR=./data/source
 
 # Processing Configuration
 BATCH_SIZE=1000
