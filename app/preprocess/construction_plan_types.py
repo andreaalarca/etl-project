@@ -1,5 +1,3 @@
-
-
 import os
 import sys
 from datetime import datetime
@@ -24,10 +22,10 @@ class ConstructionPlanTypesPreprocessor:
         'complexity_level': '',   # Fill with ''
         'base_price': 0.0,             # Fill with 0.0
     }
-    
+
     def __init__(self):
         self.extractor = ConstructionPlanTypesExtractor()
-        
+
         self.error_dir = Path(os.getenv('ERROR_DIR'))
         self.error_dir.mkdir(parents=True, exist_ok=True)
 
@@ -51,7 +49,7 @@ class ConstructionPlanTypesPreprocessor:
 
         if len(df.columns) == 0:
             raise ValueError("Input file contains no columns.")
-        
+
         # ===== STEP 2: NORMALIZE HEADER NAMES =====
 
         df.columns = (
@@ -73,7 +71,7 @@ class ConstructionPlanTypesPreprocessor:
             raise ValueError(
                 f"Missing required source columns: {missing_columns}"
             )
-        
+
         # ===== STEP 4: CLEAN STRING VALUES =====
 
         string_columns = df.select_dtypes(include="object").columns
@@ -82,8 +80,8 @@ class ConstructionPlanTypesPreprocessor:
 
             df[column] = (
                 df[column]
-                .astype(str)
-                .str.strip()
+                    .astype(str)
+                    .str.strip()
             )
 
             df[column] = df[column].replace("nan", pd.NA)
@@ -129,7 +127,7 @@ class ConstructionPlanTypesPreprocessor:
             logger.info("Construction Plan Types Job", "Preprocess", f"Saved {len(error_records)} error records to {error_file}")
 
         return df
-    
+
     def _write_to_parquet(
         self,
         cleaned_df: pd.DataFrame,
@@ -163,33 +161,8 @@ class ConstructionPlanTypesPreprocessor:
         writer.write_table(table)
 
         return writer
-    
-    
-    # def _write_to_parquet(
-    #     self,
-    #     df: pd.DataFrame,
-    #     output_path: Path,
-    # ) -> None:
-    #     """
-    #     Write a DataFrame to a Parquet file.
 
-    #     Args:
-    #         df: Cleaned DataFrame.
-    #         output_path: Full output parquet path.
-    #     """
 
-    #     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    #     table = pa.Table.from_pandas(df)
-
-    #     pq.write_table(
-    #         table,
-    #         output_path,
-    #         compression="snappy",
-    #     )
-
-    #     print(f"Parquet file written to: {output_path}")
-    
     def process(
         self,
         df: pd.DataFrame,
@@ -198,9 +171,6 @@ class ConstructionPlanTypesPreprocessor:
 
         cleaned_df = self._clean_dataframe(df)
 
-        
-    # Create output filename
-        # today = datetime.now().strftime("%Y%m%d")
 
         today = datetime.now().strftime("%Y%m%d")
 
@@ -217,28 +187,59 @@ class ConstructionPlanTypesPreprocessor:
         return cleaned_df, writer
 
 
-# if __name__ == "__main__":
+def execute() -> str:
+    """
+    Execute the construction plan types data preprocessing process.
+    This method orchestrates the preprocess step:
+    1. Read previously extracted data from staging area
+    2. Validate and clean the data
+    3. Handle missing values according to strategy
+    4. Write processed data back to staging area (overwriting input)
 
-#     preprocessor = ConstructionPlanTypesPreprocessor()
+    Returns:
+        str: Status message indicating success and details
+    """
+    try:
+        logger.info("Construction Plan Types Preprocess", "Start", "Beginning construction plan types data preprocessing")
 
-#     # Extract raw data
-#     df = preprocessor.extractor.extract()
+        # Step 1: Locate input file from extraction phase
+        today = datetime.now().strftime("%Y%m%d")
+        input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"construction_plan_types_{today}.parquet"
 
-#     # Create output filename
-#     today = datetime.now().strftime("%Y%m%d")
+        if not input_file.exists():
+            raise FileNotFoundError(f"Input file not found: {input_file}. Ensure extraction step has completed.")
 
-#     output_file = (
-#         preprocessor.staging_dir
-#         / f"construction_plan_types_{today}.parquet"
-#     )
+        # Step 2: Read data from staging area
+        df = pd.read_parquet(input_file)
+        initial_count = len(df)
+        logger.info("Construction Plan Types Preprocess", "Read Complete", f"Read {initial_count} records from {input_file}")
 
-#     # Process and write parquet
-#     cleaned_df = preprocessor.process(
-#         df=df,
-#         output_file=output_file,
-#     )
+        if df.empty:
+            logger.warning("Construction Plan Types Preprocess", "Empty Input", "Received empty DataFrame from extraction")
+            # Still write empty DataFrame to maintain pipeline
+            df.to_parquet(input_file, index=False)
+            return f"SUCCESS: Preprocessed 0 construction plan types records (empty input)"
 
-#     print("\n=== Preview ===")
-#     print(cleaned_df.head())
+        # Step 3: Process data (clean and handle missing values)
+        preprocessor = ConstructionPlanTypesPreprocessor()
+        processed_df, _ = preprocessor.process(df, None)  # We don't need the writer for single write
+        processed_count = len(processed_df)
 
-#     print(f"\nRows processed: {len(cleaned_df)}")
+        # Step 4: Write processed data back to staging area (overwrite input)
+        processed_df.to_parquet(input_file, index=False)
+        logger.info("Construction Plan Types Preprocess", "Write Complete",
+                   f"Wrote {processed_count} processed records to {input_file}")
+
+        # Log filtering info if any rows were removed
+        filtered_count = initial_count - processed_count
+        if filtered_count > 0:
+            logger.info("Construction Plan Types Preprocess", "Filtering Info",
+                       f"Filtered out {filtered_count} records during preprocessing")
+
+        logger.info("Construction Plan Types Preprocess", "Success",
+                   f"Construction plan types preprocessing completed successfully. Processed {processed_count} records.")
+        return f"SUCCESS: Preprocessed {processed_count} construction plan types records"
+
+    except Exception as e:
+        logger.error("Construction Plan Types Preprocess", "Error", f"Construction plan types preprocessing failed: {str(e)}")
+        raise  # Re-raise so Airflow marks task as failed

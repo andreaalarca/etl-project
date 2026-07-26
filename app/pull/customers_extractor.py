@@ -3,82 +3,135 @@ Customer data extraction module.
 Handles pulling/extracting customer data from CSV files.
 """
 
-import pandas as pd
+import os
 from pathlib import Path
-from typing import Optional, Union, Iterable
+import shutil
+from datetime import datetime
+import pandas as pd
 
-try:
-    # Ensure pandas is available; if not, let import error propagate
-    pass
-except Exception:
-    pass
+from .base_extractor import BaseExtractor
+from app.utils.logger import logger
 
 
-def _read_customers_csv(file_path: Path, chunksize: int = None) -> Union[pd.DataFrame, Iterable[pd.DataFrame]]:
+class CustomersExtractor(BaseExtractor):
     """
-    Internal helper to read customer CSV with optional chunking.
-
-    Args:
-        file_path: Path to the CSV file
-        chunksize: If specified, return iterator of DataFrames; else return full DataFrame
-
-    Returns:
-        DataFrame or iterator of DataFrames
+    Extracts customer data from CSV.
     """
-    if not file_path.exists():
-        raise FileNotFoundError(f"Input file not found at {file_path}")
+    file_name = "customers.csv"
 
-    try:
-        if chunksize is None:
-            df = pd.read_csv(file_path)
-            return df
-        else:
-            return pd.read_csv(file_path, chunksize=chunksize)
-    except Exception as e:
-        raise Exception(f"Error reading CSV file {file_path}: {str(e)}")
+    def __init__(self):
+        super().__init__()
+        self.staging_dir = Path(os.getenv('STAGING_DIR', './data/staging'))
 
+    def copy_to_raw(self):
+        """
+        Copy the source file to the raw directory.
 
-def extract_customers_csv(file_path: Path, chunksize: int = None) -> Union[pd.DataFrame, Iterable[pd.DataFrame]]:
-    """
-    Extract customer data from CSV file.
+        Returns:
+            Path: The path to the copied file in the raw directory
+        """
+        return super().copy_to_raw(self.source_dir / self.file_name, self.raw_dir)
 
-    Args:
-        file_path: Path to the customers.csv file
-        chunksize: If specified, return iterator of DataFrames of given size; else return full DataFrame
+    def extract(self, chunksize: int = None):
+        """
+        Extract customer data.
 
-    Returns:
-        DataFrame or iterator of DataFrames
+        Args:
+            chunksize: If specified, return iterator of DataFrames of given size; else return full DataFrame
 
-    Raises:
-        FileNotFoundError: If the input file doesn't exist
-        Exception: For other errors during extraction
-    """
-    return _read_customers_csv(file_path, chunksize)
+        Returns:
+            pandas DataFrame or iterator of DataFrames
+        """
+        return super().extract(chunksize=chunksize)
 
+    @classmethod
+    def extract_classmethod(cls, chunksize: int = None):
+        """
+        Class method shortcut for extraction.
 
-def extract_customers_from_raw(raw_dir: str = './data/raw', chunksize: int = None) -> Union[pd.DataFrame, Iterable[pd.DataFrame]]:
-    """
-    Extract customer data from the raw data directory.
+        Args:
+            chunksize: If specified, return iterator of DataFrames; else return full DataFrame
 
-    Args:
-        raw_dir: Path to raw data directory (default: './data/raw')
-        chunksize: If specified, return iterator of DataFrames; else return full DataFrame
-
-    Returns:
-        DataFrame or iterator of DataFrames
-    """
-    input_file = Path(raw_dir) / 'customers.csv'
-    return _read_customers_csv(input_file, chunksize)
+        Returns:
+            pandas DataFrame or iterator of DataFrames
+        """
+        extractor = cls()
+        extractor.copy_to_raw()
+        return extractor.extract(chunksize=chunksize)
 
 
-def extract(chunksize: int = None) -> Union[pd.DataFrame, Iterable[pd.DataFrame]]:
+def extract_customers(chunksize: int = None):
     """
     Convenience function that extracts customer data using default raw directory.
 
     Args:
-        chunkize: If specified, return iterator of DataFrames; else return full DataFrame
+        chunksize: If specified, return iterator of DataFrames; else return full DataFrame
 
     Returns:
-        DataFrame or iterator of DataFrames
+        pandas DataFrame or iterator of DataFrames
     """
-    return extract_customers_from_raw(chunksize=chunksize)
+    extractor = CustomersExtractor()
+    extractor.copy_to_raw()
+    return extractor.extract(chunksize=chunksize)
+
+
+def execute() -> str:
+    """
+    Execute the customer data extraction process.
+    This method orchestrates the extract step:
+    1. Copy source file to raw directory
+    2. Extract data from CSV (handling chunked/non-chunked internally)
+    3. Write extracted data to staging area as Parquet for preprocessing
+
+    Returns:
+        str: Status message indicating success and details
+    """
+    try:
+        logger.info("Customers Extract", "Start", "Beginning customer data extraction")
+
+        # Step 1: Copy source file to raw directory
+        extractor = CustomersExtractor()
+        raw_file_path = extractor.copy_to_raw()
+        logger.info("Customers Extract", "Copy Complete", f"Copied source file to: {raw_file_path}")
+
+        # Step 2: Extract data from CSV
+        data = extractor.extract()
+
+        # Step 3: Write to staging area for preprocessing
+        today = datetime.now().strftime("%Y%m%d")
+        staging_file = extractor.staging_dir / f"customers_{today}.parquet"
+
+        # Handle both DataFrame and iterator of DataFrames
+        if isinstance(data, pd.DataFrame):
+            # Single DataFrame case
+            data.to_parquet(staging_file, index=False)
+            record_count = len(data)
+            logger.info("Customers Extract", "Write Complete",
+                       f"Wrote {record_count} records to staging file: {staging_file}")
+        else:
+            # Iterator of DataFrames case (chunked processing)
+            chunks = []
+            for chunk in data:
+                chunks.append(chunk)
+
+            if chunks:
+                df = pd.concat(chunks, ignore_index=True)
+                df.to_parquet(staging_file, index=False)
+                record_count = len(df)
+                logger.info("Customers Extract", "Write Complete",
+                           f"Wrote {record_count} records from {len(chunks)} chunks to staging file: {staging_file}")
+            else:
+                # No data case
+                df = pd.DataFrame()
+                df.to_parquet(staging_file, index=False)
+                record_count = 0
+                logger.info("Customers Extract", "Write Complete",
+                           f"No data found, created empty staging file: {staging_file}")
+
+        logger.info("Customers Extract", "Success",
+                   f"Customer extraction completed successfully. Processed {record_count} records.")
+        return f"SUCCESS: Extracted {record_count} customer records to {staging_file}"
+
+    except Exception as e:
+        logger.error("Customers Extract", "Error", f"Customer extraction failed: {str(e)}")
+        raise  # Re-raise so Airflow marks task as failed

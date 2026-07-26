@@ -1,11 +1,11 @@
 import os
 from pathlib import Path
 import shutil
+from datetime import datetime
 
 import pandas as pd
 from sqlalchemy import create_engine, inspect, text
 from dotenv import load_dotenv
-from datetime import datetime
 import psycopg2
 import psycopg2.extras
 
@@ -15,17 +15,16 @@ from app.utils.logger import logger
 load_dotenv()
 
 
-class ConstructionPlanTypesLoader:
+class CustomersLoader:
 
-    TABLE_NAME = "construction_plan_types"
+    TABLE_NAME = "customers"
 
     def __init__(self):
         # Use WarehouseConfig to handle database connection details
         warehouse_config = WarehouseConfig()
         self.warehouse_url = warehouse_config.warehouse_url
-        # Get the specific schema this loader needs - ConstructionPlanTypesLoader uses data_lake
+        # CustomersLoader uses data_lake schema as specified
         self.schema = warehouse_config.get_schema("data_lake")
-        print(f"DEBUG: WarehouseConfig initialized with schema: {self.schema}")  # DEBUG
 
         self.batch_size = int(
             os.getenv("BATCH_SIZE", "1000")
@@ -42,7 +41,7 @@ class ConstructionPlanTypesLoader:
         base_archive_dir = Path(
             os.getenv(
                 "ARCHIVE_DIR",
-                "./data/archive/construction_plan_types",
+                "./data/archive/customers",
             )
         )
         # Create a timestamped subdirectory for this run to avoid overwriting files
@@ -50,17 +49,6 @@ class ConstructionPlanTypesLoader:
         self.archive_dir = base_archive_dir / timestamp
         # Create the archive directory
         self.archive_dir.mkdir(parents=True, exist_ok=True)
-
-        today = datetime.now().strftime("%Y%m%d")
-
-        self.staging_dir = Path(
-            f"data/staging/construction_plan_types_{today}.parquet"
-        )
-
-        self.archive_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
 
     def _ensure_schema_and_table(self):
         """Create the schema and table if they do not already exist."""
@@ -72,19 +60,27 @@ class ConstructionPlanTypesLoader:
         if not inspector.has_schema(schema_name):
             with self.engine.begin() as conn:
                 conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
-            inspector = inspect(self.engine)  # refresh
+            # Update inspector to see the new schema
+            inspector = inspect(self.engine)
 
-        # Ensure table exists
+        # Drop table if it exists (for development/testing to ensure correct schema)
+        if inspector.has_table(table_name, schema=schema_name):
+            with self.engine.begin() as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{schema_name}"."{table_name}" CASCADE'))
+            # Update inspector after dropping
+            inspector = inspect(self.engine)
+
+        # Create table if missing
         if not inspector.has_table(table_name, schema=schema_name):
-            # Create table if missing
+            # Define columns matching the specification
             columns = [
-                'plan_type_id BIGINT PRIMARY KEY',
-                'plan_type TEXT',
-                'plan_category TEXT',
-                'required_input TEXT',
-                'output_format TEXT',
-                'complexity_level TEXT',
-                'base_price DOUBLE PRECISION',
+                'customer_id INTEGER PRIMARY KEY',
+                'customer_name VARCHAR(150) NOT NULL',
+                'contact_person VARCHAR(100) NOT NULL',
+                'phone_number VARCHAR(20) NOT NULL',
+                'email VARCHAR(150) NOT NULL',
+                'city VARCHAR(100) NOT NULL',
+                'subcontractor_category VARCHAR(50) NOT NULL',
             ]
 
             cols_sql = ',\n    '.join(columns)
@@ -96,10 +92,6 @@ class ConstructionPlanTypesLoader:
 
             with self.engine.begin() as conn:
                 conn.execute(text(create_sql))
-        else:
-            # Table exists, truncate it to start fresh
-            with self.engine.begin() as conn:
-                conn.execute(text(f'TRUNCATE TABLE "{schema_name}"."{table_name}"'))
 
     def load(
         self,
@@ -150,12 +142,13 @@ class ConstructionPlanTypesLoader:
                             page_size=self.batch_size
                         )
                         inserted = len(data)
-                        raw_connection.commit()
+                        self._connection_commit(raw_connection)
             finally:
-                raw_connection.close()
+                if 'raw_connection' in locals():
+                    raw_connection.close()
         except Exception as e:
             # Fallback to SQLAlchemy method if psycopg2 fails
-            print(f"Warning: psycopg2 bulk insert failed ({e}), falling back to SQLAlchemy")
+            logger.warning("Customers Load", "Load", f"PostgreSQL bulk insert failed ({e}), falling back to SQLAlchemy")
             with self.engine.begin() as conn:
                 for start in range(
                     0,
@@ -180,6 +173,10 @@ class ConstructionPlanTypesLoader:
 
         return inserted
 
+    def _connection_commit(self, conn):
+        """Commit the given connection."""
+        conn.commit()
+
     def archive(
         self,
         source_file: Path,
@@ -201,25 +198,6 @@ class ConstructionPlanTypesLoader:
         )
 
         return destination
-
-    # def process(
-    #     self,
-    #     parquet_file: Path,
-    # ) -> int:
-    #     """
-    #     Read transformed parquet,
-    #     load into SQL,
-    #     then archive the parquet.
-    #     """
-
-    #     df = pd.read_parquet(parquet_file)
-
-    #     inserted = self.load(df)
-
-    #     self.archive(parquet_file)
-
-    #     return inserted
-
 
     def load_parquet(
         self,
@@ -247,7 +225,7 @@ class ConstructionPlanTypesLoader:
 
 def execute() -> str:
     """
-    Execute the construction plan types data loading process.
+    Execute the customer data loading process.
     This method orchestrates the load step:
     1. Read transformed data from staging area
     2. Load data into the PostgreSQL warehouse
@@ -257,14 +235,14 @@ def execute() -> str:
         str: Status message indicating success and details
     """
     try:
-        logger.info("Construction Plan Types Load", "Start", "Beginning construction plan types data loading into warehouse")
+        logger.info("Customers Load", "Start", "Beginning customer data loading into warehouse")
 
         # Import datetime here to avoid circular imports
         from datetime import datetime
 
         # Step 1: Locate input file from transformation phase
         today = datetime.now().strftime("%Y%m%d")
-        input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"construction_plan_types_{today}.parquet"
+        input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"customers_{today}.parquet"
 
         if not input_file.exists():
             raise FileNotFoundError(f"Input file not found: {input_file}. Ensure transformation step has completed.")
@@ -272,33 +250,33 @@ def execute() -> str:
         # Step 2: Read data from staging area
         df = pd.read_parquet(input_file)
         record_count = len(df)
-        logger.info("Construction Plan Types Load", "Read Complete", f"Read {record_count} records from {input_file}")
+        logger.info("Customers Load", "Read Complete", f"Read {record_count} records from {input_file}")
 
         if df.empty:
-            logger.warning("Construction Plan Types Load", "Empty Input", "Received empty DataFrame from transformation")
+            logger.warning("Customers Load", "Empty Input", "Received empty DataFrame from transformation")
             # Archive empty file to maintain pipeline consistency
-            loader = ConstructionPlanTypesLoader()
+            loader = CustomersLoader()
             loader.archive(input_file)
-            return f"SUCCESS: Loaded 0 construction plan types records into warehouse (empty input)"
+            return f"SUCCESS: Loaded 0 customer records into warehouse (empty input)"
 
         # Step 3: Load data to warehouse
-        loader = ConstructionPlanTypesLoader()
+        loader = CustomersLoader()
         rows_loaded = loader.load(df)
-        logger.info("Construction Plan Types Load", "Load Complete", f"Successfully loaded {rows_loaded} records into warehouse")
+        logger.info("Customers Load", "Load Complete", f"Successfully loaded {rows_loaded} records into warehouse")
 
         # Step 4: Archive the staging file after successful load
         archive_path = loader.archive(input_file)
-        logger.info("Construction Plan Types Load", "Archive Complete", f"Archived staging file to {archive_path}")
+        logger.info("Customers Load", "Archive Complete", f"Archived staging file to {archive_path}")
 
         # Verify we loaded all records
         if rows_loaded != record_count:
-            logger.warning("Construction Plan Types Load", "Count Mismatch",
+            logger.warning("Customers Load", "Count Mismatch",
                           f"Expected to load {record_count} records but actually loaded {rows_loaded}")
 
-        logger.info("Construction Plan Types Load", "Success",
-                   f"Construction plan types data loading completed successfully. Loaded {rows_loaded} records into warehouse.")
-        return f"SUCCESS: Loaded {rows_loaded} construction plan types records into warehouse"
+        logger.info("Customers Load", "Success",
+                   f"Customer data loading completed successfully. Loaded {rows_loaded} records into warehouse.")
+        return f"SUCCESS: Loaded {rows_loaded} customer records into warehouse"
 
     except Exception as e:
-        logger.error("Construction Plan Types Load", "Error", f"Construction plan types data loading failed: {str(e)}")
+        logger.error("Customers Load", "Error", f"Customer data loading failed: {str(e)}")
         raise  # Re-raise so Airflow marks task as failed

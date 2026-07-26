@@ -1,199 +1,241 @@
-#!/usr/bin/env python3
-"""
-ETL Script to extract customer data from CSV and load to Parquet format.
-Supports chunked processing for large files.
-"""
-
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
+import pandas as pd
+import pyarrow.parquet as pq
+import pyarrow as pa
 
-try:
-    import pandas as pd
-    import pyarrow.parquet as pq
-    import pyarrow as pa
-    from dotenv import load_dotenv
-except ImportError as e:
-    print(f"Missing required dependency: {e}")
-    print("Please install dependencies using: pip install -r requirements.txt")
-    sys.exit(1)
-
-# Import local modules
-sys.path.append(str(Path(__file__).parent.parent))
-from pull.customers_extractor import extract_customers_from_raw
+from app.utils.logger import logger
 
 
-def transform_customers(df: pd.DataFrame, error_dir: Path) -> pd.DataFrame:
+class CustomersPreprocessor:
+
+    # Configuration for missing value handling
+    MISSING_VALUE_STRATEGY = {
+        'customer_id': 'drop',        # Drop rows with missing IDs
+        'customer_name': '',          # Fill with empty string
+        'contact_person': '',         # Fill with empty string
+        'phone_number': '',           # Fill with empty string
+        'email': '',                  # Fill with empty string
+        'city': '',                   # Fill with empty string
+        'subcontractor_category': '', # Fill with empty string
+    }
+
+    def __init__(self):
+        self.error_dir = Path(os.getenv('ERROR_DIR'))
+        self.error_dir.mkdir(parents=True, exist_ok=True)
+
+        self.staging_dir = Path(os.getenv('STAGING_DIR', './data/staging'))
+        # Define preprocessing configuration (matches source columns)
+        self.REQUIRED_SOURCE_COLUMNS = [
+            'customer_id',
+            'customer_name',
+            'contact_person',
+            'phone_number',
+            'email',
+            'city',
+            'subcontractor_category'
+        ]
+
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        # ===== STEP 1: VALIDATE FILE STRUCTURE =====
+
+        if df.empty:
+            raise ValueError("Input file is empty.")
+
+        if len(df.columns) == 0:
+            raise ValueError("Input file contains no columns.")
+
+        # ===== STEP 2: NORMALIZE HEADER NAMES =====
+
+        df.columns = (
+            df.columns
+                .str.strip()
+                .str.lower()
+                .str.replace(r"[ \-]+", "_", regex=True)
+        )
+
+        # ===== STEP 3: VALIDATE SOURCE HEADERS =====
+
+        missing_columns = [
+            col
+            for col in self.REQUIRED_SOURCE_COLUMNS
+            if col not in df.columns
+        ]
+
+        if missing_columns:
+            raise ValueError(
+                f"Missing required source columns: {missing_columns}"
+            )
+
+        # ===== STEP 4: CLEAN STRING VALUES =====
+
+        string_columns = df.select_dtypes(include="object").columns
+
+        for column in string_columns:
+
+            df[column] = (
+                df[column]
+                .astype(str)
+                .str.strip()
+            )
+
+            df[column] = df[column].replace("nan", pd.NA)
+        error_records = []
+        # ===== STEP 5: HANDLE MISSING VALUES =====
+        for column, strategy in self.MISSING_VALUE_STRATEGY.items():
+            if column in df.columns:
+                missing_count = df[column].isna().sum()
+                if missing_count > 0:
+                    logger.warning("Customers Job", "Preprocess", f"Column '{column}' has {missing_count} missing values - applying strategy: '{strategy}'")
+
+                    if strategy == 'drop':
+                        # Drop rows where this column is missing
+                        df = df.dropna(subset=[column])
+                    elif isinstance(strategy, str):
+                        # Fill with string value
+                        df[column] = df[column].fillna(strategy)
+                    elif isinstance(strategy, (int, float)):
+                        # Fill with numeric value
+                        df[column] = df[column].fillna(strategy)
+                    elif isinstance(strategy, bool):
+                        # Fill with boolean value
+                        df[column] = df[column].fillna(strategy)
+
+                    # Record missing value handling
+                    error_records.append({
+                        'error_type': 'MISSING_VALUE_HANDLED',
+                        'column': column,
+                        'strategy': strategy,
+                        'count_handled': int(missing_count),
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+        # Save any error records from this chunk
+        if error_records:
+            error_df = pd.DataFrame(error_records)
+            error_file = self.error_dir / f"customers_errors_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            # Append to existing error file or create new
+            if error_file.exists():
+                error_df.to_csv(error_file, mode='a', header=False, index=False)
+            else:
+                error_df.to_csv(error_file, index=False)
+            logger.info("Customers Job", "Preprocess", f"Saved {len(error_records)} error records to {error_file}")
+
+        return df
+
+    def _write_to_parquet(
+        self,
+        cleaned_df: pd.DataFrame,
+        output_file: Path,
+        writer: pq.ParquetWriter | None = None,
+    ) -> pq.ParquetWriter:
+        """
+        Write a DataFrame to a parquet file.
+
+        If writer is None:
+            - create a new ParquetWriter
+        Else:
+            - append to the existing writer
+
+        Returns:
+            ParquetWriter
+        """
+
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        table = pa.Table.from_pandas(cleaned_df)
+
+        if writer is None:
+
+            writer = pq.ParquetWriter(
+                output_file,
+                table.schema,
+                compression="snappy",
+            )
+
+        writer.write_table(table)
+
+        return writer
+
+    def process(
+        self,
+        df: pd.DataFrame,
+        writer: pq.ParquetWriter | None = None,
+    ) -> tuple[pd.DataFrame, pq.ParquetWriter]:
+
+        cleaned_df = self._clean_dataframe(df)
+
+        # Create output filename
+        today = datetime.now().strftime("%Y%m%d")
+
+        output_file = ( self.staging_dir /
+            f"customers_{today}.parquet"
+        )
+
+        writer = self._write_to_parquet(
+            cleaned_df,
+            output_file,
+            writer,
+        )
+
+        return cleaned_df, writer
+
+
+def execute() -> str:
     """
-    Transform customer data: clean and validate.
-    Invalid records are saved to CSV for debugging.
-
-    Args:
-        df: Raw customer DataFrame
-        error_dir: Directory to save error records
+    Execute the customer data preprocessing process.
+    This method orchestrates the preprocess step:
+    1. Read previously extracted data from staging area
+    2. Validate and clean the data
+    3. Handle missing values according to strategy
+    4. Write processed data back to staging area (overwriting input)
 
     Returns:
-        Transformed customer DataFrame (valid records only)
+        str: Status message indicating success and details
     """
-    # Keep track of original rows for error detection
-    original_df = df.copy()
-
-    # Strip whitespace from string columns
-    string_columns = df.select_dtypes(include=['object']).columns
-    df[string_columns] = df[string_columns].apply(
-        lambda x: x.str.strip() if x.dtype == "object" else x
-    )
-
-    # Handle missing values - report but don't modify by default
-    missing_counts = df.isnull().sum()
-    if missing_counts.any():
-        print(f"Warning: Found missing values:\n{missing_counts}")
-
-    # Convert customer_id to integer if it exists and contains numeric data
-    if 'customer_id' in df.columns:
-        # Keep track of original values for error detection
-        original_customer_id = df['customer_id'].copy()
-        # Convert to numeric, coercing errors to NaN, then convert to nullable integer
-        df['customer_id'] = pd.to_numeric(df['customer_id'], errors='coerce').astype('Int64')
-
-        # Identify rows where customer_id conversion failed (NaN values)
-        invalid_customer_mask = df['customer_id'].isna() & original_customer_id.notna()
-        if invalid_customer_mask.any():
-            invalid_customers = original_df[invalid_customer_mask].copy()
-            invalid_customers['error_reason'] = 'Invalid customer_id (non-numeric or null after cleaning)'
-            # Save error records
-            error_file = error_dir / f"customers_customer_id_errors_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            invalid_customers.to_csv(error_file, index=False)
-            print(f"Warning: Saved {len(invalid_customers)} invalid customer records to {error_file}")
-
-    # Return only valid rows (where customer_id is not null)
-    valid_df = df.dropna(subset=['customer_id']) if 'customer_id' in df.columns else df
-    return valid_df
-
-
-def write_to_parquet(df: pd.DataFrame, output_path: Path, write_header: bool = False) -> None:
-    """
-    Write DataFrame to Parquet file, creating or appending as needed.
-
-    Args:
-        df: DataFrame to write
-        output_path: Path to the Parquet file
-        write_header: If True, write as new file (including metadata); if False, append to existing file
-    """
-    # Ensure output directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    table = pa.Table.from_pandas(df)
-
-    if write_header or not output_path.exists():
-        # Write new file
-        pq.write_table(table, output_path, compression='snappy')
-    else:
-        # Append to existing file
-        with pq.ParquetWriter(output_path, table.schema, compression='snappy') as writer:
-            writer.write_table(table)
-
-
-def main():
-    """Main ETL function with chunked processing support."""
-    # Load environment variables
-    load_dotenv()
-
-    # Get configuration from environment variables with defaults
-    raw_dir = os.getenv('RAW_DIR', './data/raw')
-    staging_dir = os.getenv('STAGING_DIR', './data/staging')
-    error_dir = os.getenv('ERROR_DIR', './data/error')  # Directory for error records
-    # Chunk size for processing (None means load all at once)
-    chunksize_str = os.getenv('CHUNK_SIZE')
-    chunksize = int(chunksize_str) if chunksize_str and chunksize_str.isdigit() else None
-
-    # Generate output filename with date and batching info
-    today_str = datetime.now().strftime('%Y%m%d')
-    entity = 'customers'
-    if chunksize is not None:
-        output_file = Path(staging_dir) / f'{entity}_{today_str}_batchingper{chunksize}.parquet'
-    else:
-        output_file = Path(staging_dir) / f'{entity}_{today_str}.parquet'
-
-    # Ensure error directory exists
-    error_path = Path(error_dir)
-    error_path.mkdir(parents=True, exist_ok=True)
-
     try:
-        # Extract: Pull customer data using the pull module
-        print(f"Extracting customer data{' in chunks of ' + str(chunksize) if chunksize else ''}...")
-        extracted_data = extract_customers_from_raw(raw_dir, chunksize=chunksize)
+        logger.info("Customers Preprocess", "Start", "Beginning customer data preprocessing")
 
-        # Initialize counters
-        total_rows = 0
-        valid_rows = 0
-        chunk_count = 0
+        # Step 1: Locate input file from extraction phase
+        today = datetime.now().strftime("%Y%m%d")
+        input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"customers_{today}.parquet"
 
-        # Process data based on whether we got a DataFrame (single chunk) or iterator (multiple chunks)
-        if isinstance(extracted_data, pd.DataFrame):
-            # Single chunk (backward compatibility)
-            print("Processing single chunk...")
-            df = transform_customers(extracted_data, error_path)
-            row_count = len(df)
-            total_rows += len(extracted_data)  # Count original rows before filtering
-            valid_rows += row_count
-            chunk_count += 1
-            print(f"Chunk {chunk_count}: {row_count} valid rows (from {len(extracted_data)} total)")
+        if not input_file.exists():
+            raise FileNotFoundError(f"Input file not found: {input_file}. Ensure extraction step has completed.")
 
-            # Write to Parquet (new file)
-            write_to_parquet(df, output_file, write_header=True)
-            print(f"Written chunk {chunk_count} to {output_file}")
-        else:
-            # Iterate over chunks
-            print("Processing chunks...")
-            for chunk_df in extracted_data:
-                chunk_count += 1
-                print(f"Processing chunk {chunk_count}...")
-                df = transform_customers(chunk_df, error_path)
-                row_count = len(df)
-                total_rows += len(chunk_df)  # Count original rows before filtering
-                valid_rows += row_count
-                print(f"Chunk {chunk_count}: {row_count} valid rows (from {len(chunk_df)} total)")
+        # Step 2: Read data from staging area
+        df = pd.read_parquet(input_file)
+        initial_count = len(df)
+        logger.info("Customers Preprocess", "Read Complete", f"Read {initial_count} records from {input_file}")
 
-                # Write chunk to Parquet (first chunk creates file, subsequent chunks append)
-                write_to_parquet(df, output_file, write_header=(chunk_count == 1))
-                print(f"Written chunk {chunk_count} to {output_file}")
+        if df.empty:
+            logger.warning("Customers Preprocess", "Empty Input", "Received empty DataFrame from extraction")
+            # Still write empty DataFrame to maintain pipeline
+            df.to_parquet(input_file, index=False)
+            return f"SUCCESS: Preprocessed 0 customer records (empty input)"
 
-        # Print summary information
-        print("\n" + "="*60)
-        print("ETL SUMMARY")
-        print("="*60)
-        print(f"Source: {Path(raw_dir) / 'customers.csv'}")
-        print(f"Destination: {output_file}")
-        print(f"Error records: {error_path}")
-        print(f"Chunk size: {chunksize if chunksize else 'All at once'}")
-        print(f"Chunks processed: {chunk_count}")
-        print(f"Total rows processed: {total_rows}")
-        print(f"Valid rows processed: {valid_rows}")
-        print(f"Invalid rows filtered: {total_rows - valid_rows}")
-        if chunk_count > 0 and 'df' in locals():
-            print(f"Columns: {list(df.columns)}")
-            print("\nData types (from last processed chunk):")
-            for col, dtype in df.dtypes.items():
-                print(f"  {col}: {dtype}")
-        else:
-            print("Columns: N/A")
-            print("\nData types: N/A")
+        # Step 3: Process data (clean and handle missing values)
+        preprocessor = CustomersPreprocessor()
+        processed_df, _ = preprocessor.process(df, None)  # We don't need the writer for single write
+        processed_count = len(processed_df)
 
-        return True
+        # Step 4: Write processed data back to staging area (overwrite input)
+        processed_df.to_parquet(input_file, index=False)
+        logger.info("Customers Preprocess", "Write Complete",
+                   f"Wrote {processed_count} processed records to {input_file}")
 
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Please ensure the customers.csv file exists in the data/raw directory.")
-        return False
+        # Log filtering info if any rows were removed
+        filtered_count = initial_count - processed_count
+        if filtered_count > 0:
+            logger.info("Customers Preprocess", "Filtering Info",
+                       f"Filtered out {filtered_count} records during preprocessing")
+
+        logger.info("Customers Preprocess", "Success",
+                   f"Customer preprocessing completed successfully. Processed {processed_count} records.")
+        return f"SUCCESS: Preprocessed {processed_count} customer records"
+
     except Exception as e:
-        print(f"Error during ETL process: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+        logger.error("Customers Preprocess", "Error", f"Customer preprocessing failed: {str(e)}")
+        raise  # Re-raise so Airflow marks task as failed

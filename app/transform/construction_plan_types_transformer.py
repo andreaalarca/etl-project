@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from datetime import datetime
 
 from app.utils.logger import logger
 
@@ -163,58 +164,58 @@ class ConstructionPlanTypesTransformer:
 
         logger.info("Construction Plan Types Job", "Transform", f"Transformation complete. Shape: {df.shape}")
         return df
-    
-#     def write_parquet(
-#         self,
-#         df: pd.DataFrame,
-#         output_path: Path,
-#     ):
 
-#         output_path.parent.mkdir(
-#             parents=True,
-#             exist_ok=True,
-#         )
 
-#         pq.write_table(
-#             pa.Table.from_pandas(df),
-#             output_path,
-#             compression="snappy",
-#     )
-        
-#     def process(
-#         self,
-#         input_parquet: Path,
-#         output_parquet: Path,
-#     ):
+def execute() -> str:
+    """
+    Execute the construction plan types data transformation process.
+    This method orchestrates the transform step:
+    1. Read preprocessed data from staging area
+    2. Apply data type transformations
+    3. Write transformed data back to staging area (overwriting input)
 
-#         df = pd.read_parquet(input_parquet)
+    Returns:
+        str: Status message indicating success and details
+    """
+    try:
+        logger.info("Construction Plan Types Transform", "Start", "Beginning construction plan types data transformation")
 
-#         transformed_df = self.transform(df)
+        # Step 1: Locate input file from preprocessing phase
+        today = datetime.now().strftime("%Y%m%d")
+        input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"construction_plan_types_{today}.parquet"
 
-#         self.write_parquet(
-#             transformed_df,
-#             output_parquet,
-#         )
+        if not input_file.exists():
+            raise FileNotFoundError(f"Input file not found: {input_file}. Ensure preprocessing step has completed.")
 
-#         return transformed_df
-    
-# if __name__ == "__main__":
+        # Step 2: Read data from staging area
+        df = pd.read_parquet(input_file)
+        record_count = len(df)
+        logger.info("Construction Plan Types Transform", "Read Complete", f"Read {record_count} records from {input_file}")
 
-#     transformer = ConstructionPlanTypesTransformer()
+        if df.empty:
+            logger.warning("Construction Plan Types Transform", "Empty Input", "Received empty DataFrame from preprocessing")
+            # Still write empty DataFrame to maintain pipeline
+            df.to_parquet(input_file, index=False)
+            return f"SUCCESS: Transformed 0 construction plan types records (empty input)"
 
-#     input_file = (
-#         transformer.staging_dir
-#         / "construction_plan_types_20260712.parquet"
-#     )
+        # Step 3: Transform data
+        transformer = ConstructionPlanTypesTransformer()
+        transformed_df = transformer.transform(df)
 
-#     output_file = (
-#         transformer.staging_dir
-#         / "construction_plan_types_transformed.parquet"
-#     )
+        # Verify we still have the same number of rows (transformation shouldn't filter rows for this table)
+        if len(transformed_df) != record_count:
+            logger.warning("Construction Plan Types Transform", "Row Count Change",
+                          f"Row count changed from {record_count} to {len(transformed_df)} during transformation")
 
-#     transformed_df = transformer.process(
-#         input_parquet=input_file,
-#         output_parquet=output_file,
-#     )
+        # Step 4: Write transformed data back to staging area (overwrite input)
+        transformed_df.to_parquet(input_file, index=False)
+        logger.info("Construction Plan Types Transform", "Write Complete",
+                   f"Wrote {len(transformed_df)} transformed records to {input_file}")
 
-#     print(transformed_df.head())
+        logger.info("Construction Plan Types Transform", "Success",
+                   f"Construction plan types transformation completed successfully. Transformed {len(transformed_df)} records.")
+        return f"SUCCESS: Transformed {len(transformed_df)} construction plan types records"
+
+    except Exception as e:
+        logger.error("Construction Plan Types Transform", "Error", f"Construction plan types transformation failed: {str(e)}")
+        raise  # Re-raise so Airflow marks task as failed

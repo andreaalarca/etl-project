@@ -15,16 +15,19 @@ from app.utils.logger import logger
 load_dotenv()
 
 
-class ConstructionPlanTypesLoader:
+class DMPLANREQUESTSLoader:
 
-    TABLE_NAME = "construction_plan_types"
+    TABLE_NAME = "dm_plan_requests"
 
     def __init__(self):
         # Use WarehouseConfig to handle database connection details
         warehouse_config = WarehouseConfig()
         self.warehouse_url = warehouse_config.warehouse_url
-        # Get the specific schema this loader needs - ConstructionPlanTypesLoader uses data_lake
-        self.schema = warehouse_config.get_schema("data_lake")
+        # Try to get schema for data_mart, fallback to "data_mart"
+        try:
+            self.schema = warehouse_config.get_schema("data_mart")
+        except (AttributeError, KeyError):
+            self.schema = "data_mart"
         print(f"DEBUG: WarehouseConfig initialized with schema: {self.schema}")  # DEBUG
 
         self.batch_size = int(
@@ -39,23 +42,19 @@ class ConstructionPlanTypesLoader:
         # Ensure schema and table exist
         self._ensure_schema_and_table()
 
+        today = datetime.now().strftime("%Y%m%d")
+        self.staging_dir = Path(
+            f"data/staging/dm_plan_requests_{today}.parquet"
+        )
+
         base_archive_dir = Path(
             os.getenv(
                 "ARCHIVE_DIR",
-                "./data/archive/construction_plan_types",
+                "./data/archive/dm_plan_requests",
             )
         )
-        # Create a timestamped subdirectory for this run to avoid overwriting files
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.archive_dir = base_archive_dir / timestamp
-        # Create the archive directory
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
-
-        today = datetime.now().strftime("%Y%m%d")
-
-        self.staging_dir = Path(
-            f"data/staging/construction_plan_types_{today}.parquet"
-        )
 
         self.archive_dir.mkdir(
             parents=True,
@@ -72,19 +71,43 @@ class ConstructionPlanTypesLoader:
         if not inspector.has_schema(schema_name):
             with self.engine.begin() as conn:
                 conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
-            inspector = inspect(self.engine)  # refresh
+            # Update inspector to see the new schema
+            inspector = inspect(self.engine)
 
-        # Ensure table exists
+        # Drop table if it exists (for development/testing to ensure correct schema)
+        if inspector.has_table(table_name, schema=schema_name):
+            with self.engine.begin() as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{schema_name}"."{table_name}" CASCADE'))
+            # Update inspector after dropping
+            inspector = inspect(self.engine)
+
+        # Create table if missing
         if not inspector.has_table(table_name, schema=schema_name):
-            # Create table if missing
+            # Define columns matching the specification
             columns = [
-                'plan_type_id BIGINT PRIMARY KEY',
-                'plan_type TEXT',
-                'plan_category TEXT',
-                'required_input TEXT',
-                'output_format TEXT',
-                'complexity_level TEXT',
-                'base_price DOUBLE PRECISION',
+                'request_id INTEGER PRIMARY KEY',
+                'customer_id INTEGER NOT NULL',
+                'customer_name VARCHAR(150) NOT NULL',
+                'contact_person VARCHAR(100) NOT NULL',
+                'phone_number VARCHAR(20) NOT NULL',
+                'email VARCHAR(150) NOT NULL',
+                'city VARCHAR(100) NOT NULL',
+                'subcontractor_category VARCHAR(50) NOT NULL',
+                'plan_type_id INTEGER NOT NULL',
+                'plan_type VARCHAR(100) NOT NULL',
+                'plan_category VARCHAR(50) NOT NULL',
+                'required_input TEXT NOT NULL',
+                'output_format VARCHAR(50) NOT NULL',
+                'complexity_level VARCHAR(20) NOT NULL',
+                'base_price NUMERIC(10,2) NOT NULL',
+                'request_date DATE NOT NULL',
+                'target_date DATE',
+                'completed_date DATE',
+                'status VARCHAR(30) NOT NULL',
+                'priority VARCHAR(20) NOT NULL',
+                'assigned_coordinator VARCHAR(100) NOT NULL',
+                'floor_area_sqm NUMERIC(10,2) NOT NULL',
+                'revision_count INTEGER NOT NULL',
             ]
 
             cols_sql = ',\n    '.join(columns)
@@ -96,10 +119,6 @@ class ConstructionPlanTypesLoader:
 
             with self.engine.begin() as conn:
                 conn.execute(text(create_sql))
-        else:
-            # Table exists, truncate it to start fresh
-            with self.engine.begin() as conn:
-                conn.execute(text(f'TRUNCATE TABLE "{schema_name}"."{table_name}"'))
 
     def load(
         self,
@@ -180,6 +199,64 @@ class ConstructionPlanTypesLoader:
 
         return inserted
 
+    def execute(self) -> str:
+        """
+        Execute the dm_plan_requests data loading process.
+        This method orchestrates the load step:
+        1. Read transformed data from staging area
+        2. Load data into the PostgreSQL warehouse
+        3. Archive the staging file after successful load
+
+        Returns:
+            str: Status message indicating success and details
+        """
+        try:
+            logger.info("DM Plan Requests Load", "Start", "Beginning dm_plan_requests data loading into warehouse")
+
+            # Import datetime here to avoid circular imports
+            from datetime import datetime
+
+            # Step 1: Locate input file from transformation phase
+            today = datetime.now().strftime("%Y%m%d")
+            input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"dm_plan_requests_{today}.parquet"
+
+            if not input_file.exists():
+                raise FileNotFoundError(f"Input file not found: {input_file}. Ensure transformation step has completed.")
+
+            # Step 2: Read data from staging area
+            df = pd.read_parquet(input_file)
+            record_count = len(df)
+            logger.info("DM Plan Requests Load", "Read Complete", f"Read {record_count} records from {input_file}")
+
+            if df.empty:
+                logger.warning("DM Plan Requests Load", "Empty Input", "Received empty DataFrame from transformation")
+                # Archive empty file to maintain pipeline consistency
+                loader = DMPLANREQUESTSLoader()
+                loader.archive(input_file)
+                return f"SUCCESS: Loaded 0 dm_plan_requests records into warehouse (empty input)"
+
+            # Step 3: Load data to warehouse
+            loader = DMPLANREQUESTSLoader()
+            rows_loaded = loader.load(df)
+            logger.info("DM Plan Requests Load", "Load Complete", f"Successfully loaded {rows_loaded} records into warehouse")
+
+            # Step 4: Archive the staging file after successful load
+            archive_path = loader.archive(input_file)
+            logger.info("DM Plan Requests Load", "Archive Complete", f"Archived staging file to {archive_path}")
+
+            # Verify we loaded all records
+            if rows_loaded != record_count:
+                logger.warning("DM Plan Requests Load", "Count Mismatch",
+                              f"Expected to load {record_count} records but actually loaded {rows_loaded}")
+
+            logger.info("DM Plan Requests Load", "Success",
+                       f"DM plan requests data loading completed successfully. Loaded {rows_loaded} records into warehouse.")
+            return f"SUCCESS: Loaded {rows_loaded} dm_plan_requests records into warehouse"
+
+        except Exception as e:
+            logger.error("DM Plan Requests Load", "Error", f"DM plan requests data loading failed: {str(e)}")
+            raise  # Re-raise so Airflow marks task as failed
+
     def archive(
         self,
         source_file: Path,
@@ -201,25 +278,6 @@ class ConstructionPlanTypesLoader:
         )
 
         return destination
-
-    # def process(
-    #     self,
-    #     parquet_file: Path,
-    # ) -> int:
-    #     """
-    #     Read transformed parquet,
-    #     load into SQL,
-    #     then archive the parquet.
-    #     """
-
-    #     df = pd.read_parquet(parquet_file)
-
-    #     inserted = self.load(df)
-
-    #     self.archive(parquet_file)
-
-    #     return inserted
-
 
     def load_parquet(
         self,
@@ -243,62 +301,3 @@ class ConstructionPlanTypesLoader:
         self.archive(self.staging_dir)
 
         return inserted
-
-
-def execute() -> str:
-    """
-    Execute the construction plan types data loading process.
-    This method orchestrates the load step:
-    1. Read transformed data from staging area
-    2. Load data into the PostgreSQL warehouse
-    3. Archive the staging file after successful load
-
-    Returns:
-        str: Status message indicating success and details
-    """
-    try:
-        logger.info("Construction Plan Types Load", "Start", "Beginning construction plan types data loading into warehouse")
-
-        # Import datetime here to avoid circular imports
-        from datetime import datetime
-
-        # Step 1: Locate input file from transformation phase
-        today = datetime.now().strftime("%Y%m%d")
-        input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"construction_plan_types_{today}.parquet"
-
-        if not input_file.exists():
-            raise FileNotFoundError(f"Input file not found: {input_file}. Ensure transformation step has completed.")
-
-        # Step 2: Read data from staging area
-        df = pd.read_parquet(input_file)
-        record_count = len(df)
-        logger.info("Construction Plan Types Load", "Read Complete", f"Read {record_count} records from {input_file}")
-
-        if df.empty:
-            logger.warning("Construction Plan Types Load", "Empty Input", "Received empty DataFrame from transformation")
-            # Archive empty file to maintain pipeline consistency
-            loader = ConstructionPlanTypesLoader()
-            loader.archive(input_file)
-            return f"SUCCESS: Loaded 0 construction plan types records into warehouse (empty input)"
-
-        # Step 3: Load data to warehouse
-        loader = ConstructionPlanTypesLoader()
-        rows_loaded = loader.load(df)
-        logger.info("Construction Plan Types Load", "Load Complete", f"Successfully loaded {rows_loaded} records into warehouse")
-
-        # Step 4: Archive the staging file after successful load
-        archive_path = loader.archive(input_file)
-        logger.info("Construction Plan Types Load", "Archive Complete", f"Archived staging file to {archive_path}")
-
-        # Verify we loaded all records
-        if rows_loaded != record_count:
-            logger.warning("Construction Plan Types Load", "Count Mismatch",
-                          f"Expected to load {record_count} records but actually loaded {rows_loaded}")
-
-        logger.info("Construction Plan Types Load", "Success",
-                   f"Construction plan types data loading completed successfully. Loaded {rows_loaded} records into warehouse.")
-        return f"SUCCESS: Loaded {rows_loaded} construction plan types records into warehouse"
-
-    except Exception as e:
-        logger.error("Construction Plan Types Load", "Error", f"Construction plan types data loading failed: {str(e)}")
-        raise  # Re-raise so Airflow marks task as failed
