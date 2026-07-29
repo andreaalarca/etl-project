@@ -199,7 +199,7 @@ class DMPLANREQUESTSLoader:
 
         return inserted
 
-    def execute(self) -> str:
+    def execute(self, execution_date: str = None) -> str:
         """
         Execute the dm_plan_requests data loading process.
         This method orchestrates the load step:
@@ -207,18 +207,22 @@ class DMPLANREQUESTSLoader:
         2. Load data into the PostgreSQL warehouse
         3. Archive the staging file after successful load
 
+        Args:
+            execution_date: The execution date in YYYYMMDD format. If None, uses today's date.
+
         Returns:
             str: Status message indicating success and details
         """
         try:
-            logger.info("DM Plan Requests Load", "Start", "Beginning dm_plan_requests data loading into warehouse")
+            logger.info("DM Plan Requests Load", "Start", f"Beginning dm_plan_requests data loading into warehouse for {execution_date or 'today'}")
 
             # Import datetime here to avoid circular imports
             from datetime import datetime
 
             # Step 1: Locate input file from transformation phase
-            today = datetime.now().strftime("%Y%m%d")
-            input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"dm_plan_requests_{today}.parquet"
+            if execution_date is None:
+                execution_date = datetime.now().strftime("%Y%m%d")
+            input_file = Path(os.getenv('STAGING_DIR', './data/staging')) / f"dm_plan_requests_{execution_date}.parquet"
 
             if not input_file.exists():
                 raise FileNotFoundError(f"Input file not found: {input_file}. Ensure transformation step has completed.")

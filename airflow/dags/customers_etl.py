@@ -27,32 +27,32 @@ with DAG(
             extract = PythonOperator(
                 task_id=f'extract_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
-                    f'app.pull.{tn}_extractor', fromlist=['execute']
-                ).execute,
+                    f'app.pull.{tn}_extractor', fromlist=['execute()']
+                ).execute(),
             )
 
             # Preprocess task
             preprocess = PythonOperator(
                 task_id=f'preprocess_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
-                    f'app.preprocess.{tn}', fromlist=['execute']
-                ).execute,
+                    f'app.preprocess.{tn}', fromlist=['execute()']
+                ).execute(),
             )
 
             # Transform task
             transform = PythonOperator(
                 task_id=f'transform_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
-                    f'app.transform.{tn}_transformer', fromlist=['execute']
-                ).execute,
+                    f'app.transform.{tn}_transformer', fromlist=['execute()']
+                ).execute(),
             )
 
             # Load task
             load = PythonOperator(
                 task_id=f'load_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
-                    f'app.load.{tn}_loader', fromlist=['execute']
-                ).execute,
+                    f'app.load.{tn}_loader', fromlist=['execute()']
+                ).execute(),
             )
 
             # Internal dependencies: extract → preprocess → transform → load

@@ -85,6 +85,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ../app:/opt/airflow/app
     - ../data:/opt/airflow/data
+    - ../datamart:/opt/airflow/datamart
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -187,7 +188,8 @@ services:
 
   airflow-worker:
     <<: *airflow-common
-    command: celery worker
+    hostname: airflow-worker
+    command: airflow celery worker
     healthcheck:
       # yamllint disable rule:line-length
       test: ["CMD-SHELL", 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"']
@@ -197,6 +199,7 @@ services:
       start_period: 30s
     environment:
       <<: *airflow-common-env
+      AIRFLOW__LOGGING__WORKER_LOG_SERVER_PORT: 8793
       # Required to handle warm shutdown of the celery workers properly
       # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
       DUMB_INIT_SETSID: "0"

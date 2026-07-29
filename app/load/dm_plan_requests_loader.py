@@ -12,14 +12,17 @@ from datamart.load.dm_plan_requests_loader import DMPLANREQUESTSLoader
 DmPlanRequestsLoader = DMPLANREQUESTSLoader
 
 
-def execute() -> str:
+def execute(execution_date: str = None) -> str:
     """
     Execute the dm_plan_requests data loading process.
     Delegates to the datamart loader's execute method.
+
+    Args:
+        execution_date: The execution date in YYYYMMDD format. If None, uses today's date.
 
     Returns:
         str: Status message indicating success and details
     """
     # Delegate to the actual implementation in datamart
     loader = DMPLANREQUESTSLoader()
-    return loader.execute()
+    return loader.execute(execution_date=execution_date)

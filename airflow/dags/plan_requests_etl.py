@@ -2,10 +2,10 @@
 ETL DAG for Plan Requests
 Independent ETL pipeline for plan requests data.
 """
-
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
 
 # Default arguments for the DAG
@@ -40,7 +40,7 @@ with DAG(
                 task_id=f'extract_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
                     f'app.pull.{tn}_extractor', fromlist=['execute']
-                ).execute,
+                ).execute(),
             )
 
             # Preprocess task
@@ -48,7 +48,7 @@ with DAG(
                 task_id=f'preprocess_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
                     f'app.preprocess.{tn}', fromlist=['execute']
-                ).execute,
+                ).execute(),
             )
 
             # Transform task
@@ -56,7 +56,7 @@ with DAG(
                 task_id=f'transform_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
                     f'app.transform.{tn}_transformer', fromlist=['execute']
-                ).execute,
+                ).execute(),
             )
 
             # Load task
@@ -64,14 +64,29 @@ with DAG(
                 task_id=f'load_{table_name}',
                 python_callable=lambda tn=table_name: __import__(
                     f'app.load.{tn}_loader', fromlist=['execute']
-                ).execute,
+                ).execute(),
             )
 
             # Internal dependencies: extract → preprocess → transform → load
             extract >> preprocess >> transform >> load
 
-        # Return the TaskGroup for full visibility
-        return tg
+        # Return the load task for setting dependencies
+        return load
 
-    # Create and expose the task group
-    processing_plan_requests = create_table_tasks('plan_requests')
+    # Create and get the load task for plan_requests
+    plan_requests_load_task = create_table_tasks('plan_requests')
+
+    # Trigger dm_plan_requests_etl DAG after successful load of plan_requests
+    # Added reset_dag_run=True to clear any stale DagRun state after restart
+    trigger_dm_plan_requests = TriggerDagRunOperator(
+        task_id='trigger_dm_plan_requests_etl',
+        trigger_dag_id='dm_plan_requests_etl',
+        wait_for_completion=True,
+        reset_dag_run=True,  # Clear any existing DagRun for this execution date
+        poke_interval=60,
+        allowed_states=['success'],
+        failed_states=['failed'],
+    )
+
+    # Set dependency: wait for load task to complete, then trigger downstream DAG
+    plan_requests_load_task >> trigger_dm_plan_requests
