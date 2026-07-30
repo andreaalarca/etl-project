@@ -38,8 +38,8 @@ with DAG(
                 # Import here to avoid circular imports
                 from app.model.dm_plan_requests_model import execute
 
-                # Get execution date from context
-                execution_date = context['ds_nodash']  # YYYYMMDD format
+                # Get execution date from context - using ds (YYYY-MM-DD format) for date filtering
+                execution_date = context['ds']  # YYYY-MM-DD format
 
                 # Execute the model - returns status message
                 result = execute(execution_date=execution_date)
@@ -57,8 +57,8 @@ with DAG(
                 # Import here to avoid circular imports
                 from app.load.dm_plan_requests_loader import execute
 
-                # Get execution date from context
-                execution_date = context['ds_nodash']  # YYYYMMDD format
+                # Get execution date from context - using ds (YYYY-MM-DD format) for file path
+                execution_date = context['ds']  # YYYY-MM-DD format
 
                 # Execute the load - returns status message
                 result = execute(execution_date=execution_date)

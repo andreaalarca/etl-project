@@ -85,7 +85,6 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ../app:/opt/airflow/app
     - ../data:/opt/airflow/data
-    - ../datamart:/opt/airflow/datamart
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on

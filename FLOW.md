@@ -1,127 +1,168 @@
-# ETL Flow Explanation (Construction Plan Types Job)
+# ETL Flow Explanation (DM Plan Requests Job)
 
-This document explains the end‑to‑end flow of the **construction_plan_types_job.py** job, focusing on how chunking interacts with staging and archiving, and clarifies the archiving behavior.
+This document explains the end‑to‑end flow of the **dm_plan_requests_etl** DAG, focusing on how the modular components (extractor, preprocessor, model‑transformer, loader) interact, how staging files are handled, and the archiving process.
 
----  
+--- 
 
-## 1. High‑level Pipeline  
+## 1. High‑level Pipeline
 
 ```
-Extractor  →  Preprocessor  →  Transformer  →  Loader
-   │            │            │            │
-   ▼            ▼            ▼            ▼
-Source file  Cleaned DF   Transformed DF  Loaded into Warehouse
-                                                            │
-                                                            ▼
-                                                     Archive (staging → archive)
+Extractor  →  Preprocessor  →  Model (Transformer)  →  Loader
+   │               │                │                   │
+   ▼               ▼                ▼                   ▼
+Source file   Cleaned DF     Joined & Typed DF   Loaded into Warehouse
+                                                                    │
+                                                                    ▼
+                                                         Archive (staging → archive)
 ```
 
-The **Job orchestrator** (`app/jobs/construction_plan_types_job.py`) orchestrates the four stages:
+The DAG orchestrates four main tasks within a `TaskGroup`:
 
-1. **Creates** the extractor, preprocessor, transformer, and loader objects.  
-2. **Pulls** data from the extractor – either a single `pandas.DataFrame` (no chunking) or a generator of `DataFrame`s (when `chunksize` > 0).  
-3. **Passes a writer object** to the preprocessor so cleaned data can be appended to a **single** Parquet staging file.  
-4. **Sends** each transformed chunk to the loader for bulk insertion.  
-5. **After all chunks** are processed, archives the single staging file (or moves it to an error directory on failure).
+1. **Extractor** – pulls raw data from source CSV files (via `app.pull.<table>_extractor`).
+2. **Preprocessor** – cleans and validates the raw data (via `app.preprocess.<table>`).
+3. **Model** – performs the data‑model transformation (joins, type casting) and writes the result to a staging Parquet file (via `app.model.<table>_model`).
+4. **Loader** – reads the staged Parquet file and bulk‑loads it into the target warehouse table (via `app.load.<table>_loader`).
 
----
+After the loader succeeds, the staging file is moved to an archive directory.
 
-## 2. Extractor Output  
+--- 
 
-| `chunksize` argument | Return type of `extract_construction_plan_types(chunksize=…)` |
-|----------------------|--------------------------------------------------------------|
+## 2. Extractor Output
+
+The extractor follows the same pattern used across the project:
+
+| `chunksize` argument | Return type of `extract_<table>(chunksize=…)` |
+|----------------------|-----------------------------------------------|
 | **`None`** (default) | A single `pandas.DataFrame` containing the whole file. |
 | **Integer > 0**      | A **generator** yielding `pandas.DataFrame` objects, each ≤ `chunksize` rows. |
 
 *The extractor only reads the source file; it never writes to disk.*
 
----
+--- 
 
-## 3. Writer (Staging File Handling)
+## 3. Preprocessor (Staging File Handling)
 
-* The **preprocessor** (`ConstructionPlanTypesPreprocessor`) receives a `writer` argument.  
-* **First call**: creates a **Parquet writer** pointed at `self.staging_dir` (e.g., `data/staging/construction_plan_types_20260721.parquet`).  
-* **Subsequent calls**: receives the same writer, appends the cleaned chunk, and returns the updated writer.  
-* After the final chunk, the job’s `finally` block calls `writer.close()` to finalize the file.
+The preprocessor receives an optional `writer` argument (a `pyarrow.ParquetWriter`):
 
-**Result:** Whether the data arrived as one DataFrame or many chunks, **exactly one** Parquet file ends up at `self.staging_dir`.
+* **First call**: creates a Parquet writer pointing at the staging file path  
+  (`<staging_dir>/<table>_<execution_date>.parquet`).
+* **Subsequent calls**: receives the same writer, appends the cleaned chunk, and returns the updated writer.
+* After processing all chunks, the DAG’s `finally` block calls `writer.close()` to finalize the file.
 
----
+**Result:** Whether the data arrived as one DataFrame or many chunks, **exactly one** Parquet file ends up in the staging directory for the given execution date.
 
-## 4. Loader Responsibilities  
+--- 
 
-* `ConstructionPlanTypesLoader.__init__` receives the target schema, table name, and `batch_size` from the job configuration.  
-* Its `load(df)` method receives a **transformed** `DataFrame` (either the whole dataset or a chunk) and inserts it into the warehouse using:  
+## 4. Model (Transformer) Responsibilities
 
-  1. **Primary path** – `psycopg2.extras.execute_values` (high‑performance bulk insert).  
-  2. **Fallback path** – SQLAlchemy `to_sql` with `method="multi"` if the psycopg2 path fails.  
+The model class (`DmPlanRequestsModel`) now **embeds the transformation logic** that previously lived in a separate `datamart.transform` module. Its `execute(execution_date)` method:
 
-*The loader never touches the staging file; it works solely with the in‑memory DataFrame supplied to it.*
+1. Receives an `execution_date` string (`YYYY-MM-DD`) – either from the Airflow context (`ds`) or, when `None`, defaults to **today’s date in the Philippines timezone (Asia/Manila)**.
+2. Instantiates the internal transformer (`DMPLANREQUESTSTransformer`) which:
+   * Builds a SQL query that joins `data_lake.plan_requests`, `data_lake.customers`, and `data_lake.construction_plan_types`.
+   * **Always** applies a `WHERE pr.request_date = DATE 'YYYY-MM-DD'` filter using the (possibly defaulted) execution date.
+   * Executes the query via SQLAlchemy, returning a joined `DataFrame`.
+   * Performs final data‑type conversions to match the target warehouse schema.
+3. Writes the resulting DataFrame to the staging Parquet file (path determined by `_get_staging_file_path(execution_date)`).
+4. Returns a status string indicating success and the number of rows processed.
 
----
+Because the filtering happens **inside the SQL query**, only the relevant day’s data is ever read from the source tables, making the step efficient.
 
-## 5. Archiving Step  
+--- 
 
-After the `try/except` block finishes (whether successfully or via an exception that is re‑raised only after writer handling), the job executes:
+## 5. Loader Responsibilities
 
-```python
-if writer is not None:
-    logger.info("Construction Plan Types Job", "Load",
-                f"Archiving staging files from {loader.staging_dir}")
-    loader.archive(loader.staging_dir)
-```
+The loader (`DmPlanRequestsLoader`) receives the execution date to locate the correct staging file:
 
-* `loader.archive(source_file: Path)` moves the file from `source_file` (the staging path) to a **timestamped subdirectory** under the configured archive root:
+* Its `execute(execution_date)` method:
+  1. Builds the expected staging file path: `<staging_dir>/dm_plan_requests_<execution_date>.parquet`.
+  2. Reads the entire Parquet file into a `DataFrame`.
+  3. Performs a high‑performance bulk insert into the warehouse table `data_mart.dm_plan_requests` using:
+     - Primary path: `psycopg2.extras.execute_values`.
+     - Fallback: SQLAlchemy `to_sql` with `method="multi"`.
+  4. After a successful load, calls `archive()` to move the staging file to a timestamped subdirectory under the archive root.
+  5. Returns a status string with the number of rows loaded.
 
-```
-<archive_root>/<timestamp>/construction_plan_types_20260721.parquet
-```
+The loader never reads or modifies the source data directly; it works solely with the staged Parquet file produced by the model.
 
-* Because there is **only one** staging file (see §3), the archive step moves **that single file**.  
-* The archive filename **remains unchanged**; only its directory gets a timestamp, preserving traceability.
+--- 
 
-### Archiving Behavior Summary
+## 6. Archiving Step
 
-| Scenario                               | Staging file produced                                   | Archive result                                                                 |
-|----------------------------------------|----------------------------------------------------------|--------------------------------------------------------------------------------|
-| **No chunking** (`chunksize=None`)     | One Parquet file containing the whole dataset.           | Moved once to `<archive>/<timestamp>/construction_plan_types_<date>.parquet`. |
-| **Chunked processing** (`chunksize=N`) | One Parquet file that grows incrementally as each cleaned chunk is appended. | Same single file moved once after the last chunk has been processed.          |
-| **Error during processing**            | Writer may have written some chunks; job moves the **partially written** file to the error directory (`_move_source_file_to_error`) **instead** of archiving it. | No archive; the source file is quarantined for inspection.                    |
+After the loader task completes successfully, the DAG executes an archive step (handled inside the loader’s `execute` method, but conceptually a separate phase):
 
----
+* `loader.archive(source_file: Path)` moves the file from  
+  `<staging_dir>/dm_plan_requests_<execution_date>.parquet`  
+  to  
+  `<archive_root>/<timestamp>/dm_plan_requests_<execution_date>.parquet`  
+  where `<timestamp>` is `YYYYMMDD_HHMMSS` of the archival moment.
 
-## 6. Diagram of the Flow with Chunking  
+* Because there is **only one** staging file per execution date, the archive step moves exactly one file.
+* If any step fails before the loader completes, the staging file is **not** archived; instead, it remains in the staging directory for manual inspection (or can be cleared by a cleanup process).
+
+--- 
+
+## 7. Diagram of the Flow (with optional chunking)
 
 ```
 Source file (CSV)
         │
-Extractor (generator of chunks) ──► ──► ──► ──► ──► ──► ──► ──►
-        │                           │   │   │   │   │   │   │
-        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
-Preprocessor (receives writer)   Chunk‑1 Chunk‑2 … Chunk‑k
-        │                           │   │   │   │   │   │   │
-        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
-Transformer                       ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓
-        │                         (cleaned chunks)
-        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
-Loader                            ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
-        │                         Inserted into warehouse
-        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼
-   (after loop) writer.close()   │   │   │   │   │   │   │   │
-        │                         │   │   │   │   │   │   │   │
-        ▼                         ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
-   Archive step ──────────────────► Move staging.parquet → archive/<ts>/staging.parquet
+Extractor (generator of chunks) ──► ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
+Preprocessor (receives writer)  Chunk‑1 Chunk‑2 … Chunk‑k
+        │                           │   │   │   │   │   │   │   │   │
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
+Model (Transformer + Writer)  ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ▼
+        │                    (Cleaned & validated chunks)
+        ▼                           ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼   ▼
+                                 Join + Type Casting (SQL) 
+        │                                   │
+        ▼                                   ▼
+                     Joined & Typed DF (single)
+        │                                   │
+        ▼                                   ▼
+                     Write Staging Parquet (one file)
+        │                                   │
+        ▼                                   ▼
+                     Loader (bulk insert) 
+        │                                   │
+        ▼                                   ▼
+                 Inserted into Warehouse
+        │                                   │
+        ▼                                   ▼
+                 Archive Step 
+        │                                   │
+        ▼                                   ▼
+   Move staging file to archive/<timestamp>/
 ```
 
----
+*Note:* Even if the extractor yields multiple chunks, the model writes **only one** Parquet file per execution date because the writer is created once and reused across all chunks (the same pattern used by other ETL jobs in this repo).
 
-## 7. Key Take‑aways  
+--- 
 
-* **Chunking does NOT create multiple staging/archive files** – the design intentionally writes *all* cleaned data to a **single** Parquet file (`staging_path`).  
-* Consequently, the **archive step always moves exactly one file**, regardless of `chunksize`.  
-* If you ever need **per‑chunk archiving** (e.g., to keep intermediate snapshots), you would need to modify the job to call `loader.archive` inside the chunk loop or change the preprocessor to write a new file each iteration.  
-* The current implementation is optimal for most ETL workloads: a single archive file simplifies downstream auditing while still allowing **high‑performance bulk inserts** via chunked reading to keep memory usage low.  
+## 8. Key Take‑aways
 
----
+* **Execution date handling:**  
+  - When the DAG runs, Airflow supplies `ds` (YYYY-MM-DD) → used as the `execution_date`.  
+  - If the model is invoked manually without an argument, it defaults to **today’s date in the Philippines timezone (Asia/Manila)**, formatted as YYYY-MM-DD.  
+  - The model’s transformer **always** applies a `WHERE pr.request_date = DATE 'YYYY-MM-DD'` clause, ensuring only the relevant day’s data is processed.
 
-*Thank you for reading!*
+* **Single staging file per run:**  
+  - Regardless of chunking, exactly one Parquet file (`dm_plan_requests_<YYYY-MM-DD>.parquet`) is created in the staging directory.  
+  - Consequently, the archive step moves a single file, simplifying traceability and cleanup.
+
+* **Efficiency:**  
+  - Filtering occurs at the database level (inside the SQL join), minimizing data transfer.  
+  - The loader uses `psycopg2.extras.execute_values` for high‑performance bulk inserts, with a safe fallback to SQLAlchemy.
+
+* **Modularity:**  
+  - The transformation logic is now encapsulated within the model class (`app.model.dm_plan_requests_model`), eliminating the need for a separate `datamart.transform` module.  
+  - The loader is a standalone implementation in `app.load.dm_plan_requests_loader` (the previous delegating wrapper has been replaced with the full class).
+
+* **Fault tolerance:**  
+  - If any task fails, the workflow stops and the staging file remains in place for inspection (not archived).  
+  - Successful runs automatically archive the staging file, preserving a copy for auditing or reprocessing if needed.
+
+--- 
+
+*This document reflects the current state of the `dm_plan_requests_etl` DAG after the recent refactor to consolidate transformation logic into the model layer and to unify the loader implementation, with execution date expected in YYYY-MM-DD format.*
